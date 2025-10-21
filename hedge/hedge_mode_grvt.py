@@ -75,8 +75,8 @@ class HedgeBot:
 
         # Setup logger
         self.logger = logging.getLogger(f"hedge_bot_{ticker}")
-        # 暫時啟用 DEBUG 來檢查 position 數據
-        self.logger.setLevel(logging.DEBUG)
+        # 設置日誌級別 - 恢復 INFO 級別
+        self.logger.setLevel(logging.INFO)
 
         # Clear any existing handlers to avoid duplicates
         self.logger.handlers.clear()
@@ -85,7 +85,10 @@ class HedgeBot:
         logging.getLogger('urllib3').setLevel(logging.WARNING)
         logging.getLogger('requests').setLevel(logging.WARNING)
         logging.getLogger('websockets').setLevel(logging.WARNING)
-        # Disable verbose pysdk logging
+        # 抑制 GRVT SDK 的過多日誌
+        logging.getLogger('root').setLevel(logging.WARNING)
+        logging.getLogger('pysdk').setLevel(logging.WARNING)
+        logging.getLogger('pysdk.grvt_ccxt_base').setLevel(logging.WARNING)
         logging.getLogger('pysdk').setLevel(logging.WARNING)
         logging.getLogger('pysdk.grvt_ccxt_logging_selector').setLevel(logging.WARNING)
 
