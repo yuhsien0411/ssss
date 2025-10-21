@@ -796,9 +796,9 @@ class HedgeBot:
         self.waiting_for_lighter_fill = True
         
         # 立即觸發對沖檢查，減少延遲
-        self.logger.info(f"🚀 Immediate hedge trigger for {filled_size} {lighter_side} @ {price}")
+        self.logger.info(f"🚀 Immediate hedge trigger for {self.order_quantity} {lighter_side} @ {price}")
         
-        self.logger.info(f"🔄 Hedge calculation: GRVT position={self.grvt_position}, hedge_quantity={filled_size}")
+        self.logger.info(f"🔄 Hedge calculation: GRVT position={self.grvt_position}, hedge_quantity={self.order_quantity}")
 
     async def get_grvt_position(self):
         """獲取 GRVT 實際持倉 - 帶速率限制"""
