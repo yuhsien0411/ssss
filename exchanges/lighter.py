@@ -522,15 +522,23 @@ class LighterClient(BaseExchangeClient):
 
     async def get_account_positions(self) -> Decimal:
         """Get account positions using official SDK."""
-        # Get account info which includes positions
-        positions = await self._fetch_positions_with_retry()
+        try:
+            # Get account info which includes positions
+            positions = await self._fetch_positions_with_retry()
 
-        # Find position for current market
-        for position in positions:
-            if position.market_id == self.config.contract_id:
-                return Decimal(position.position)
+            # Find position for current market
+            for position in positions:
+                if position.market_id == self.config.contract_id:
+                    position_size = Decimal(position.position)
+                    self.logger.log(f"Found Lighter position: {position_size} for market {self.config.contract_id}", "INFO")
+                    return position_size
 
-        return Decimal(0)
+            self.logger.log(f"No Lighter position found for market {self.config.contract_id}", "INFO")
+            return Decimal(0)
+            
+        except Exception as e:
+            self.logger.log(f"Error getting Lighter positions: {e}", "ERROR")
+            return Decimal(0)
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID for a ticker."""
