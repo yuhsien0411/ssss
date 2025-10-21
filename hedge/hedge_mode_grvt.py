@@ -1237,6 +1237,16 @@ class HedgeBot:
                         self.current_lighter_price
                     )
                     break
+                
+                # 備用觸發機制：檢查持倉變化
+                current_grvt_pos = await self.get_grvt_position()
+                if current_grvt_pos != Decimal('0') and not self.waiting_for_lighter_fill:
+                    self.logger.warning(f"⚠️ Backup hedge trigger: GRVT position={current_grvt_pos}, triggering hedge")
+                    # 觸發對沖
+                    lighter_side = 'sell' if current_grvt_pos > 0 else 'buy'
+                    hedge_quantity = abs(current_grvt_pos)
+                    await self.place_lighter_market_order(lighter_side, hedge_quantity, Decimal('0'))
+                    break
 
                 await asyncio.sleep(0.1)  # 快速檢查對沖觸發
                 if time.time() - start_time > 180:
@@ -1285,6 +1295,16 @@ class HedgeBot:
                         self.current_lighter_price
                     )
                     break
+                
+                # 備用觸發機制：檢查持倉變化
+                current_grvt_pos = await self.get_grvt_position()
+                if current_grvt_pos != Decimal('0') and not self.waiting_for_lighter_fill:
+                    self.logger.warning(f"⚠️ Backup hedge trigger: GRVT position={current_grvt_pos}, triggering hedge")
+                    # 觸發對沖
+                    lighter_side = 'sell' if current_grvt_pos > 0 else 'buy'
+                    hedge_quantity = abs(current_grvt_pos)
+                    await self.place_lighter_market_order(lighter_side, hedge_quantity, Decimal('0'))
+                    break
 
                 await asyncio.sleep(0.001)  # 提高檢查頻率到 1ms
                 if time.time() - start_time > 180:
@@ -1319,6 +1339,16 @@ class HedgeBot:
                         self.current_lighter_quantity,
                         self.current_lighter_price
                     )
+                    break
+                
+                # 備用觸發機制：檢查持倉變化
+                current_grvt_pos = await self.get_grvt_position()
+                if current_grvt_pos != Decimal('0') and not self.waiting_for_lighter_fill:
+                    self.logger.warning(f"⚠️ Backup hedge trigger: GRVT position={current_grvt_pos}, triggering hedge")
+                    # 觸發對沖
+                    lighter_side = 'sell' if current_grvt_pos > 0 else 'buy'
+                    hedge_quantity = abs(current_grvt_pos)
+                    await self.place_lighter_market_order(lighter_side, hedge_quantity, Decimal('0'))
                     break
 
                 await asyncio.sleep(0.001)  # 提高檢查頻率到 1ms
