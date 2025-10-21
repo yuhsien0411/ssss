@@ -47,6 +47,9 @@ class HedgeBot:
         self.hedge_grace_period = 1.0  # 秒
         self.hedge_grace_until = None  # 寬限期截止時間
         self.hedge_in_progress = False  # 是否正在進行對沖
+        
+        # 持倉監控任務
+        self.position_monitor_task = None
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -178,6 +181,14 @@ class HedgeBot:
                 self.logger.info("🔌 Lighter WebSocket task cancelled")
             except Exception as e:
                 self.logger.error(f"Error cancelling Lighter WebSocket task: {e}")
+                
+        # Cancel position monitor task
+        if self.position_monitor_task and not self.position_monitor_task.done():
+            try:
+                self.position_monitor_task.cancel()
+                self.logger.info("🔌 Position monitor task cancelled")
+            except Exception as e:
+                self.logger.error(f"Error cancelling position monitor task: {e}")
 
         # Close logging handlers properly
         for handler in self.logger.handlers[:]:
@@ -843,6 +854,28 @@ class HedgeBot:
             self.logger.error(f"❌ Error fetching Lighter position: {e}")
             return Decimal('0')
 
+    async def position_monitor(self):
+        """持倉監控任務 - 每 1 秒檢查一次持倉"""
+        while not self.stop_flag:
+            try:
+                # 獲取實際持倉
+                grvt_pos = await self.get_grvt_position()
+                lighter_pos = await self.get_lighter_position()
+                
+                # 檢查持倉匹配
+                position_diff = abs(grvt_pos + lighter_pos)
+                if position_diff > Decimal('0.001'):
+                    self.logger.warning(f"⚠️ Position mismatch: GRVT={grvt_pos}, Lighter={lighter_pos}, diff={position_diff}")
+                else:
+                    self.logger.debug(f"✅ Positions match: GRVT={grvt_pos}, Lighter={lighter_pos}")
+                
+                # 等待 1 秒
+                await asyncio.sleep(1.0)
+                
+            except Exception as e:
+                self.logger.error(f"❌ Error in position monitor: {e}")
+                await asyncio.sleep(1.0)
+
     async def cancel_all_grvt_orders(self):
         """取消所有未成交的 GRVT 訂單 - 使用 GRVT SDK 的 cancel_all_orders 方法"""
         try:
@@ -1126,6 +1159,10 @@ class HedgeBot:
         except Exception as e:
             self.logger.error(f"❌ Failed to setup Lighter websocket: {e}")
             return
+            
+        # 啟動持倉監控任務
+        self.position_monitor_task = asyncio.create_task(self.position_monitor())
+        self.logger.info("✅ Position monitor task started")
 
         await asyncio.sleep(5)
 
@@ -1153,40 +1190,11 @@ class HedgeBot:
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
                 break
 
-            # 使用實際持倉檢查來觸發對沖，而不是依賴 WebSocket
+            # 主要依賴 GRVT WebSocket 觸發對沖，持倉檢查作為監控
             start_time = time.time()
-            last_grvt_position = await self.get_grvt_position()
-            last_lighter_position = await self.get_lighter_position()
             
             while not self.order_execution_complete and not self.stop_flag:
-                # 定期檢查實際持倉變化
-                current_grvt_position = await self.get_grvt_position()
-                current_lighter_position = await self.get_lighter_position()
-                
-                # 檢查 GRVT 持倉是否有變化（表示有新成交）
-                if current_grvt_position != last_grvt_position:
-                    self.logger.info(f"🔄 GRVT position changed: {last_grvt_position} → {current_grvt_position}")
-                    
-                    # 計算需要對沖的數量
-                    position_change = current_grvt_position - last_grvt_position
-                    if abs(position_change) > Decimal('0.001'):  # 有顯著變化
-                        # 觸發對沖
-                        lighter_side = 'sell' if position_change > 0 else 'buy'
-                        hedge_quantity = abs(position_change)
-                        
-                        self.logger.info(f"🚀 Position-based hedge trigger: {hedge_quantity} {lighter_side}")
-                        
-                        # 立即執行對沖
-                        await self.place_lighter_market_order(
-                            lighter_side,
-                            hedge_quantity,
-                            Decimal('0')
-                        )
-                        break
-                    
-                    last_grvt_position = current_grvt_position
-                
-                # 檢查是否已經有對沖觸發
+                # 檢查是否已經有對沖觸發（主要機制）
                 if self.waiting_for_lighter_fill:
                     await self.place_lighter_market_order(
                         self.current_lighter_side,
@@ -1195,7 +1203,7 @@ class HedgeBot:
                     )
                     break
 
-                await asyncio.sleep(1.0)  # 每 1 秒檢查一次持倉，避免 API 速率限制
+                await asyncio.sleep(0.1)  # 快速檢查對沖觸發
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
@@ -1206,7 +1214,7 @@ class HedgeBot:
             # Close position
             self.logger.info(f"[STEP 2] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
             
-            # 獲取並顯示實際 GRVT 和 Lighter 持倉
+            # 獲取並顯示實際 GRVT 和 Lighter 持倉（每 1 秒監控）
             actual_grvt_position = await self.get_grvt_position()
             actual_lighter_position = await self.get_lighter_position()
             self.logger.info(f"📊 GRVT actual position: {actual_grvt_position}")
