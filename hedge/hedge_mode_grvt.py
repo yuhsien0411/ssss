@@ -813,11 +813,23 @@ class HedgeBot:
             if not self.lighter_client:
                 return Decimal('0')
             
-            # 使用 Lighter SDK 的 get_account_positions 方法獲取實際持倉
-            position_size = await self.lighter_client.get_account_positions()
+            # 使用 Lighter API 獲取持倉信息
+            from lighter.api.account_api import AccountApi
+            account_api = AccountApi(self.lighter_client.api_client)
             
-            self.logger.info(f"📊 Lighter actual position: {position_size}")
-            return position_size
+            # 獲取賬戶信息
+            account_data = await account_api.account(by="index", value=str(self.lighter_client.account_index))
+            
+            if account_data and account_data.accounts:
+                positions = account_data.accounts[0].positions
+                for position in positions:
+                    if position.market_id == self.lighter_market_index:
+                        position_size = Decimal(position.position)
+                        self.logger.info(f"📊 Lighter actual position: {position_size}")
+                        return position_size
+            
+            self.logger.info(f"📊 Lighter actual position: 0 (no positions found)")
+            return Decimal('0')
             
         except Exception as e:
             self.logger.error(f"❌ Error fetching Lighter position: {e}")
