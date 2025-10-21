@@ -696,7 +696,7 @@ class HedgeBot:
                         self.grvt_order_status = None
                         break  # 跳出內層循環，重新下單
                     elif self.grvt_order_status in ['NEW', 'OPEN', 'PENDING', 'CANCELING', 'PARTIALLY_FILLED']:
-                        await asyncio.sleep(0.3)  # 縮短檢查間隔
+                        await asyncio.sleep(0.1)  # 縮短檢查間隔到 100ms
                         if time.time() - start_time > timeout_duration:
                             try:
                                 # 取消訂單
@@ -718,7 +718,7 @@ class HedgeBot:
                             break
                         else:
                             # Wait for order status update
-                            await asyncio.sleep(0.3)
+                            await asyncio.sleep(0.1)  # 縮短檢查間隔到 100ms
                             # Check for timeout if no status update
                             if time.time() - start_time > timeout_duration + 5:
                                 self.logger.error("❌ Timeout waiting for order status update")
@@ -778,6 +778,9 @@ class HedgeBot:
         self.hedge_grace_until = time.time() + self.hedge_grace_period
         self.hedge_in_progress = True
         self.waiting_for_lighter_fill = True
+        
+        # 立即觸發對沖檢查，減少延遲
+        self.logger.info(f"🚀 Immediate hedge trigger for {hedge_quantity} {lighter_side} @ {price}")
         
         self.logger.info(f"🔄 Hedge calculation: GRVT position={self.grvt_position}, hedge_quantity={hedge_quantity}")
 
@@ -884,7 +887,7 @@ class HedgeBot:
                 self.order_execution_complete = True
                 break
 
-            await asyncio.sleep(0.05)  # 市價單檢查頻率更高
+            await asyncio.sleep(0.01)  # 市價單檢查頻率更高 - 10ms
 
     async def monitor_lighter_order(self, client_order_index: int):
         """Monitor Lighter order with improved timeout and retry logic."""
@@ -923,7 +926,7 @@ class HedgeBot:
                     self.order_execution_complete = True
                     break
 
-            await asyncio.sleep(0.1)  # Check every 100ms
+            await asyncio.sleep(0.01)  # Check every 10ms for faster response
 
     async def modify_lighter_order(self, client_order_index: int, new_price: Decimal):
         """Modify current Lighter order with new price using client_order_index."""
@@ -1125,7 +1128,7 @@ class HedgeBot:
                     )
                     break
 
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.001)  # 提高檢查頻率到 1ms
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
@@ -1164,7 +1167,7 @@ class HedgeBot:
                     )
                     break
 
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.001)  # 提高檢查頻率到 1ms
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
@@ -1199,7 +1202,7 @@ class HedgeBot:
                     )
                     break
 
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.001)  # 提高檢查頻率到 1ms
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
