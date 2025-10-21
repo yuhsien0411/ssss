@@ -248,11 +248,11 @@ class HedgeBot:
             if order_data["is_ask"]:
                 order_data["side"] = "SHORT"
                 order_type = "OPEN"
-                self.lighter_position -= Decimal(order_data["filled_base_amount"])
+                self.lighter_position -= Decimal(order_data["filled_base_amount"])  # 賣出減少持倉
             else:
                 order_data["side"] = "LONG"
                 order_type = "CLOSE"
-                self.lighter_position += Decimal(order_data["filled_base_amount"])
+                self.lighter_position += Decimal(order_data["filled_base_amount"])  # 買入增加持倉
 
             client_order_index = order_data["client_order_id"]
 
