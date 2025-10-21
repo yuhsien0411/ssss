@@ -751,8 +751,8 @@ class HedgeBot:
                 
                 # 使用 REST API 輪詢訂單狀態
                 start_time = time.time()
-                timeout_duration = 15 if retry_count == 0 else 10  # 增加超時時間
-                poll_interval = 1.0  # 每 1 秒查詢一次
+                timeout_duration = 30 if retry_count == 0 else 20  # 增加超時時間以減少重試
+                poll_interval = 3.0  # 每 3 秒查詢一次，避免 API 速率限制
                 last_poll_time = start_time - poll_interval  # 立即開始第一次查詢
                 last_status_log_time = start_time
                 
@@ -770,8 +770,8 @@ class HedgeBot:
                                 order_data = order_response['result']
                                 order_status = order_data.get('state', 'UNKNOWN')
                                 
-                                # 每 2 秒記錄一次狀態
-                                if current_time - last_status_log_time >= 2:
+                                # 每 6 秒記錄一次狀態（減少日誌輸出）
+                                if current_time - last_status_log_time >= 6:
                                     self.logger.info(f"⏳ Waiting for GRVT order fill... ({elapsed:.1f}s / {timeout_duration}s) Status: {order_status}")
                                     last_status_log_time = current_time
                                 
