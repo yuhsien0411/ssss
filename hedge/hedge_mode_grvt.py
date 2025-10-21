@@ -807,6 +807,22 @@ class HedgeBot:
             self.logger.error(f"❌ Error fetching GRVT position: {e}")
             return Decimal('0')
 
+    async def get_lighter_position(self):
+        """獲取 Lighter 實際持倉"""
+        try:
+            if not self.lighter_client:
+                return Decimal('0')
+            
+            # 使用 Lighter SDK 的 get_account_positions 方法獲取實際持倉
+            position_size = await self.lighter_client.get_account_positions()
+            
+            self.logger.info(f"📊 Lighter actual position: {position_size}")
+            return position_size
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error fetching Lighter position: {e}")
+            return Decimal('0')
+
     async def cancel_all_grvt_orders(self):
         """取消所有未成交的 GRVT 訂單 - 使用 GRVT SDK 的 cancel_all_orders 方法"""
         try:
@@ -1139,9 +1155,18 @@ class HedgeBot:
             # Close position
             self.logger.info(f"[STEP 2] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
             
-            # 獲取並顯示實際 GRVT 持倉
+            # 獲取並顯示實際 GRVT 和 Lighter 持倉
             actual_grvt_position = await self.get_grvt_position()
+            actual_lighter_position = await self.get_lighter_position()
             self.logger.info(f"📊 GRVT actual position: {actual_grvt_position}")
+            self.logger.info(f"📊 Lighter actual position: {actual_lighter_position}")
+            
+            # 檢查持倉是否匹配
+            position_diff = abs(actual_grvt_position + actual_lighter_position)
+            if position_diff > Decimal('0.001'):  # 允許 0.001 的誤差
+                self.logger.warning(f"⚠️ Position mismatch detected: GRVT={actual_grvt_position}, Lighter={actual_lighter_position}, diff={position_diff}")
+            else:
+                self.logger.info(f"✅ Positions match: GRVT={actual_grvt_position}, Lighter={actual_lighter_position}")
             
             # 取消所有未成交的 GRVT 訂單
             await self.cancel_all_grvt_orders()
