@@ -948,8 +948,8 @@ class HedgeBot:
                 if status == 'CANCELED' and filled_size > 0:
                     status = 'FILLED'
 
-                # Handle the order update
-                if status == 'FILLED' and self.grvt_order_status != 'FILLED':
+                # Handle the order update - 處理 FILLED 和 PARTIALLY_FILLED
+                if (status == 'FILLED' or status == 'PARTIALLY_FILLED') and filled_size > 0:
                     if side == 'buy':
                         self.grvt_position += filled_size
                     else:
@@ -965,6 +965,8 @@ class HedgeBot:
                         quantity=str(filled_size)
                     )
 
+                    # 觸發對沖 - 即使只是部分成交也要對沖
+                    self.logger.info(f"🔄 Triggering hedge for {filled_size} {side} @ {price}")
                     self.handle_grvt_order_update({
                         'order_id': order_id,
                         'side': side,
