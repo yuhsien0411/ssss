@@ -327,16 +327,20 @@ class GrvtClient(BaseExchangeClient):
             if direction == 'buy':
                 # 買單：使用 best_bid + 50% spread，更容易成交
                 spread = best_ask - best_bid
-                order_price = best_bid + (spread * Decimal('0.5'))
+                raw_price = best_bid + (spread * Decimal('0.5'))
             elif direction == 'sell':
                 # 賣單：使用 best_ask - 50% spread，更容易成交
                 spread = best_ask - best_bid
-                order_price = best_ask - (spread * Decimal('0.5'))
+                raw_price = best_ask - (spread * Decimal('0.5'))
             else:
                 raise Exception(f"[OPEN] Invalid direction: {direction}")
             
+            # 對齊到 tick size - 修復 "Invalid limit price tick" 錯誤
+            tick_size = self.config.tick_size
+            order_price = (raw_price / tick_size).quantize(Decimal('1'), rounding='ROUND_HALF_UP') * tick_size
+            
             # 添加訂單價格調試日誌
-            self.logger.log(f"[OPEN] Spread: {spread:.2f}, Order price - Direction: {direction}, Price: {order_price}", "INFO")
+            self.logger.log(f"[OPEN] Spread: {spread:.2f}, Raw price: {raw_price}, Tick-aligned price: {order_price}", "INFO")
 
             # Place the order using GRVT SDK
             try:
