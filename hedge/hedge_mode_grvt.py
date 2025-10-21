@@ -781,6 +781,33 @@ class HedgeBot:
         
         self.logger.info(f"🔄 Hedge calculation: GRVT position={self.grvt_position}, hedge_quantity={hedge_quantity}")
 
+    async def cancel_all_grvt_orders(self):
+        """取消所有未成交的 GRVT 訂單"""
+        try:
+            if not self.grvt_client:
+                return
+            
+            # 獲取所有活躍訂單
+            active_orders = await self.grvt_client.get_active_orders(self.grvt_contract_id)
+            
+            if active_orders:
+                self.logger.info(f"🔄 Canceling {len(active_orders)} active GRVT orders...")
+                
+                for order in active_orders:
+                    try:
+                        cancel_result = await self.grvt_client.cancel_order(order.order_id)
+                        if cancel_result.success:
+                            self.logger.info(f"✅ Canceled GRVT order: {order.order_id}")
+                        else:
+                            self.logger.warning(f"⚠️ Failed to cancel GRVT order {order.order_id}: {cancel_result.error_message}")
+                    except Exception as e:
+                        self.logger.error(f"❌ Error canceling GRVT order {order.order_id}: {e}")
+            else:
+                self.logger.info("✅ No active GRVT orders to cancel")
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error getting/canceling GRVT orders: {e}")
+
     async def place_lighter_market_order(self, lighter_side: str, quantity: Decimal, price: Decimal):
         """真正的市價單對沖 - 使用市價單而不是限價單"""
         if not self.lighter_client:
@@ -1095,6 +1122,10 @@ class HedgeBot:
 
             # Close position
             self.logger.info(f"[STEP 2] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
+            
+            # 取消所有未成交的 GRVT 訂單
+            await self.cancel_all_grvt_orders()
+            
             self.order_execution_complete = False
             self.waiting_for_lighter_fill = False
             try:
