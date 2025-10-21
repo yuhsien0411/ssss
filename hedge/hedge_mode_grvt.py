@@ -813,6 +813,7 @@ class HedgeBot:
                 self.logger.debug(f"🔍 GRVT positions raw data: {positions}")
                 for position in positions:
                     if position.get('instrument') == self.grvt_contract_id:
+                        # GRVT position size: 負數=空頭, 正數=多頭
                         position_size = Decimal(str(position.get('size', '0')))
                         self.logger.info(f"📊 GRVT actual position: {position_size} (from API)")
                         self.logger.debug(f"🔍 GRVT position details: {position}")
@@ -857,9 +858,14 @@ class HedgeBot:
                     self.logger.debug(f"🔍 Lighter positions raw: {account.positions}")
                     for position in account.positions:
                         if int(position.market_id) == self.lighter_market_index:
-                            position_size = Decimal(str(position.position))
+                            # Lighter position: position 字段是絕對值，sign 字段表示方向
+                            # sign: 1 = 多頭, -1 = 空頭
+                            position_abs = Decimal(str(position.position))
+                            position_sign = int(position.sign) if hasattr(position, 'sign') else 1
+                            position_size = position_abs * position_sign
+                            
                             self.logger.info(f"📊 Lighter actual position: {position_size} (from API)")
-                            self.logger.debug(f"🔍 Lighter position details: market_id={position.market_id}, position={position.position}")
+                            self.logger.debug(f"🔍 Lighter position details: market_id={position.market_id}, position={position.position}, sign={position_sign}")
                             return position_size
             
             self.logger.info(f"📊 Lighter actual position: 0 (no positions found)")
@@ -884,7 +890,8 @@ class HedgeBot:
                 grvt_pos = await self.get_grvt_position()
                 lighter_pos = await self.get_lighter_position()
                 
-                # 檢查持倉匹配
+                # 檢查持倉匹配 - 正確對沖時兩邊持倉應該相加為 0
+                # GRVT +0.01 (多頭) + Lighter -0.01 (空頭) = 0 ✅
                 position_diff = abs(grvt_pos + lighter_pos)
                 if position_diff > Decimal('0.001'):
                     self.logger.warning(f"⚠️ Position mismatch detected: GRVT={grvt_pos}, Lighter={lighter_pos}, diff={position_diff}")
@@ -1295,12 +1302,12 @@ class HedgeBot:
             self.logger.info(f"📊 GRVT actual position: {actual_grvt_position}")
             self.logger.info(f"📊 Lighter actual position: {actual_lighter_position}")
             
-            # 檢查持倉是否匹配
+            # 檢查持倉是否匹配 - 正確對沖時兩邊持倉應該相加為 0
             position_diff = abs(actual_grvt_position + actual_lighter_position)
             if position_diff > Decimal('0.001'):  # 允許 0.001 的誤差
                 self.logger.warning(f"⚠️ Position mismatch detected: GRVT={actual_grvt_position}, Lighter={actual_lighter_position}, diff={position_diff}")
             else:
-                self.logger.info(f"✅ Positions match: GRVT={actual_grvt_position}, Lighter={actual_lighter_position}")
+                self.logger.info(f"✅ Positions match: GRVT={actual_grvt_position}, Lighter={actual_lighter_position}, diff={position_diff:.6f}")
             
             # 取消所有未成交的 GRVT 訂單
             await self.cancel_all_grvt_orders()
