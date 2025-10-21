@@ -787,8 +787,8 @@ class HedgeBot:
             if not self.grvt_client:
                 return
             
-            # 使用 GRVT SDK 的 cancel_all_orders 方法
-            cancel_response = await self.grvt_client.cancel_all_orders()
+            # 使用 GRVT SDK 的 cancel_all_orders 方法，指定 PERPETUAL 類型
+            cancel_response = await self.grvt_client.cancel_all_orders(params={"kind": "PERPETUAL"})
             
             if cancel_response:
                 self.logger.info("✅ Successfully canceled all GRVT orders")
