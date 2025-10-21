@@ -761,30 +761,21 @@ class HedgeBot:
                     break
 
     def handle_grvt_order_update(self, order_data):
-        """Handle GRVT order updates from WebSocket."""
+        """Handle GRVT order updates from WebSocket - 觸發實際持倉檢查."""
         side = order_data.get('side', '').lower()
         filled_size = Decimal(order_data.get('filled_size', '0'))
         price = Decimal(order_data.get('price', '0'))
 
-        if side == 'buy':
-            lighter_side = 'sell'
-        else:
-            lighter_side = 'buy'
-
-        # 計算需要對沖的數量 - 使用單次成交數量，不是累積持倉
-        hedge_quantity = filled_size
-
-        # Store order details for immediate execution
-        self.current_lighter_side = lighter_side
-        self.current_lighter_quantity = hedge_quantity  # 使用計算出的對沖數量
-        self.current_lighter_price = price
-
-        self.lighter_order_info = {
-            'lighter_side': lighter_side,
-            'quantity': hedge_quantity,
-            'price': price
-        }
-
+        # 不在這裡計算對沖數量，而是觸發持倉檢查
+        # 實際的對沖數量應該基於 GRVT 和 Lighter 的實際持倉差異
+        # 這樣可以確保完全匹配，而不會累積誤差
+        
+        self.logger.info(f"📡 GRVT order update: {side} {filled_size} @ {price}")
+        self.logger.info(f"🔄 Will check actual positions and hedge based on real mismatch")
+        
+        # 設置標誌，讓 position_monitor 立即檢查和對沖
+        # 不直接設置 current_lighter_side 等參數，讓 position_monitor 計算
+        
         # 設置對沖寬限期 (1秒)
         import time
         self.hedge_grace_until = time.time() + self.hedge_grace_period
@@ -899,8 +890,8 @@ class HedgeBot:
                 if position_diff > Decimal('0.001'):
                     self.logger.warning(f"⚠️ Position mismatch detected: GRVT={grvt_pos}, Lighter={lighter_pos}, diff={position_diff}")
                     
-                    # 緊急對沖：修復不匹配的持倉
-                    if position_diff > Decimal('0.001') and not self.waiting_for_lighter_fill:
+                    # 緊急對沖：修復不匹配的持倉 - 確保持倉完全一致
+                    if position_diff > Decimal('0.001'):
                         # 正確的對沖邏輯：GRVT 和 Lighter 應該方向相反，總和為 0
                         # 目標：grvt_pos + lighter_pos = 0
                         # 所以：target_lighter_pos = -grvt_pos
@@ -914,8 +905,11 @@ class HedgeBot:
                             # 需要減少 Lighter 持倉（賣出）
                             lighter_side = 'sell'
                         
-                        self.logger.warning(f"🚨 Emergency hedge: GRVT={grvt_pos} → Target Lighter={target_lighter_pos}, Current Lighter={lighter_pos}")
-                        self.logger.warning(f"🚨 Emergency hedge: Correcting mismatch with {hedge_quantity} {lighter_side}")
+                        self.logger.warning(f"🚨 Position mismatch hedge:")
+                        self.logger.warning(f"   GRVT: {grvt_pos}")
+                        self.logger.warning(f"   Lighter Current: {lighter_pos}")
+                        self.logger.warning(f"   Lighter Target: {target_lighter_pos}")
+                        self.logger.warning(f"   → Need to {lighter_side} {hedge_quantity}")
                         
                         # 設置對沖參數
                         self.current_lighter_side = lighter_side
@@ -929,8 +923,8 @@ class HedgeBot:
                 else:
                     self.logger.debug(f"✅ Positions match: GRVT={grvt_pos}, Lighter={lighter_pos}")
                 
-                # 等待 2 秒，降低 API 調用頻率
-                await asyncio.sleep(2.0)
+                # 等待 1 秒，更頻繁地檢查持倉以確保完全匹配
+                await asyncio.sleep(1.0)
                 
             except Exception as e:
                 self.logger.error(f"❌ Error in position monitor: {e}")
