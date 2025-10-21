@@ -781,6 +781,29 @@ class HedgeBot:
         
         self.logger.info(f"🔄 Hedge calculation: GRVT position={self.grvt_position}, hedge_quantity={hedge_quantity}")
 
+    async def get_grvt_position(self):
+        """獲取 GRVT 實際持倉"""
+        try:
+            if not self.grvt_client:
+                return Decimal('0')
+            
+            # 使用 GRVT SDK 的 fetch_positions 方法獲取實際持倉
+            positions = self.grvt_client.rest_client.fetch_positions(symbols=[self.grvt_contract_id])
+            
+            if positions:
+                for position in positions:
+                    if position.get('instrument') == self.grvt_contract_id:
+                        position_size = Decimal(str(position.get('size', '0')))
+                        self.logger.info(f"📊 GRVT actual position: {position_size}")
+                        return position_size
+            
+            self.logger.info("📊 GRVT actual position: 0 (no positions found)")
+            return Decimal('0')
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error fetching GRVT position: {e}")
+            return Decimal('0')
+
     async def cancel_all_grvt_orders(self):
         """取消所有未成交的 GRVT 訂單 - 使用 GRVT SDK 的 cancel_all_orders 方法"""
         try:
@@ -1112,6 +1135,10 @@ class HedgeBot:
 
             # Close position
             self.logger.info(f"[STEP 2] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
+            
+            # 獲取並顯示實際 GRVT 持倉
+            actual_grvt_position = await self.get_grvt_position()
+            self.logger.info(f"📊 GRVT actual position: {actual_grvt_position}")
             
             # 取消所有未成交的 GRVT 訂單
             await self.cancel_all_grvt_orders()
