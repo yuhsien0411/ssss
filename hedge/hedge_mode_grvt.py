@@ -786,7 +786,7 @@ class HedgeBot:
         
         # 設置對沖參數
         self.current_lighter_side = lighter_side
-        self.current_lighter_quantity = filled_size  # 使用成交數量
+        self.current_lighter_quantity = self.order_quantity  # 使用設定的訂單數量，而不是成交數量
         self.current_lighter_price = price
         
         # 設置對沖寬限期 (1秒)
