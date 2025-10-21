@@ -768,15 +768,25 @@ class HedgeBot:
         filled_size = Decimal(order_data.get('filled_size', '0'))
         price = Decimal(order_data.get('price', '0'))
 
-        # 不在這裡計算對沖數量，而是觸發持倉檢查
-        # 實際的對沖數量應該基於 GRVT 和 Lighter 的實際持倉差異
-        # 這樣可以確保完全匹配，而不會累積誤差
-        
+        # 更新 GRVT 持倉
+        if side == 'buy':
+            self.grvt_position += filled_size
+        else:
+            self.grvt_position -= filled_size
+
         self.logger.info(f"📡 GRVT order update: {side} {filled_size} @ {price}")
-        self.logger.info(f"🔄 Will check actual positions and hedge based on real mismatch")
+        self.logger.info(f"🔄 GRVT position updated to: {self.grvt_position}")
         
-        # 設置標誌，讓 position_monitor 立即檢查和對沖
-        # 不直接設置 current_lighter_side 等參數，讓 position_monitor 計算
+        # 計算對沖方向
+        if side == 'buy':
+            lighter_side = 'sell'  # GRVT 買入，Lighter 賣出對沖
+        else:
+            lighter_side = 'buy'   # GRVT 賣出，Lighter 買入對沖
+        
+        # 設置對沖參數
+        self.current_lighter_side = lighter_side
+        self.current_lighter_quantity = filled_size  # 使用成交數量
+        self.current_lighter_price = price
         
         # 設置對沖寬限期 (1秒)
         import time
@@ -785,9 +795,9 @@ class HedgeBot:
         self.waiting_for_lighter_fill = True
         
         # 立即觸發對沖檢查，減少延遲
-        self.logger.info(f"🚀 Immediate hedge trigger for {hedge_quantity} {lighter_side} @ {price}")
+        self.logger.info(f"🚀 Immediate hedge trigger for {filled_size} {lighter_side} @ {price}")
         
-        self.logger.info(f"🔄 Hedge calculation: GRVT position={self.grvt_position}, hedge_quantity={hedge_quantity}")
+        self.logger.info(f"🔄 Hedge calculation: GRVT position={self.grvt_position}, hedge_quantity={filled_size}")
 
     async def get_grvt_position(self):
         """獲取 GRVT 實際持倉 - 帶速率限制"""
@@ -955,6 +965,15 @@ class HedgeBot:
         if not self.lighter_client:
             self.initialize_lighter_client()
 
+        # 檢查參數有效性
+        if lighter_side is None:
+            self.logger.error("❌ lighter_side is None, cannot place order")
+            return None
+            
+        if quantity is None or quantity <= 0:
+            self.logger.error(f"❌ Invalid quantity: {quantity}")
+            return None
+
         best_bid, best_ask = self.get_lighter_best_levels()
 
         # 市價單策略：使用更激進的價格確保立即成交
@@ -962,12 +981,20 @@ class HedgeBot:
             order_type = "CLOSE"
             is_ask = False
             # 市價買入：使用更高的價格確保立即成交
-            price = best_ask[0] * Decimal('1.02')  # 比最佳賣價高 2%
+            if best_ask and len(best_ask) >= 2:
+                price = best_ask[0] * Decimal('1.02')  # 比最佳賣價高 2%
+            else:
+                self.logger.error("❌ No best ask price available")
+                return None
         else:
             order_type = "OPEN"
             is_ask = True
             # 市價賣出：使用更低的價格確保立即成交
-            price = best_bid[0] * Decimal('0.98')  # 比最佳買價低 2%
+            if best_bid and len(best_bid) >= 2:
+                price = best_bid[0] * Decimal('0.98')  # 比最佳買價低 2%
+            else:
+                self.logger.error("❌ No best bid price available")
+                return None
 
         # Reset order state
         self.lighter_order_filled = False
@@ -995,6 +1022,9 @@ class HedgeBot:
             return tx_hash
         except Exception as e:
             self.logger.error(f"❌ Error placing Lighter market order: {e}")
+            self.logger.error(f"❌ Order details: side={lighter_side}, quantity={quantity}, price={price}")
+            import traceback
+            self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
             return None
 
     async def monitor_lighter_market_order(self, client_order_index: int):
