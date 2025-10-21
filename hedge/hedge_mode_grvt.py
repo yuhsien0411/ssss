@@ -800,25 +800,13 @@ class HedgeBot:
         try:
             client_order_index = int(time.time() * 1000)
             
-            # 使用市價單類型 - 修復過期時間問題
-            tx_info, error = self.lighter_client.sign_create_order(
+            # 使用 Lighter 專用的市價單方法
+            tx_hash = await self.lighter_client.create_market_order(
                 market_index=self.lighter_market_index,
                 client_order_index=client_order_index,
                 base_amount=int(quantity * self.base_amount_multiplier),
-                price=int(price * self.price_multiplier),
+                avg_execution_price=int(price * self.price_multiplier),  # 使用 avg_execution_price 參數
                 is_ask=is_ask,
-                order_type=self.lighter_client.ORDER_TYPE_MARKET,  # 使用市價單
-                time_in_force=self.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,  # 使用 GTT 而不是 IOC
-                reduce_only=False,
-                trigger_price=0,
-            )
-            if error is not None:
-                raise Exception(f"Sign error: {error}")
-
-            # Prepare the form data
-            tx_hash = await self.lighter_client.send_tx(
-                tx_type=self.lighter_client.TX_TYPE_CREATE_ORDER,
-                tx_info=tx_info
             )
 
             self.logger.info(f"[{client_order_index}] [{order_type}] [Lighter] [MARKET]: {quantity} @ {price}")
