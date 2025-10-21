@@ -54,7 +54,9 @@ class HedgeBot:
         # API 速率限制管理
         self.last_grvt_position_call = 0
         self.last_lighter_position_call = 0
-        self.grvt_rate_limit = 2.0  # 2.0 秒間隔，保守設置避免 429 錯誤（30 次/分鐘）
+        # GRVT Level 3-4: 讀取操作 75-100 次/10秒 = 每秒 7.5-10 次
+        # 設置為 0.5 秒間隔 = 每秒 2 次，遠低於限制
+        self.grvt_rate_limit = 0.5
         
         # Lighter 帳戶類型檢測
         self.lighter_account_type = os.getenv('LIGHTER_ACCOUNT_TYPE', 'standard')  # 'standard' 或 'premium'
@@ -923,8 +925,9 @@ class HedgeBot:
                 else:
                     self.logger.debug(f"✅ Positions match: GRVT={grvt_pos}, Lighter={lighter_pos}")
                 
-                # 等待 2.5 秒，與 GRVT 速率限制對齊，避免 API 429 錯誤
-                await asyncio.sleep(2.5)
+                # 等待 1.0 秒，與 GRVT 速率限制對齊
+                # GRVT Level 3-4 允許每秒 7.5-10 次讀取操作，我們每秒只做 1 次
+                await asyncio.sleep(1.0)
                 
             except Exception as e:
                 self.logger.error(f"❌ Error in position monitor: {e}")
@@ -1221,11 +1224,12 @@ class HedgeBot:
         # 顯示速率限制設置
         self.logger.info(f"📊 API Rate Limits:")
         self.logger.info(f"   GRVT: {self.grvt_rate_limit}s interval (~{int(60/self.grvt_rate_limit)} calls/min)")
+        self.logger.info(f"   GRVT Level 3-4: 允許 75-100 次讀取操作/10秒 (450-600 calls/min)")
         if self.lighter_account_type == 'premium':
             self.logger.info(f"   Lighter: {self.lighter_rate_limit}s interval (premium: 24000 calls/min)")
         else:
             self.logger.info(f"   Lighter: {self.lighter_rate_limit}s interval (standard: 60 calls/min)")
-        self.logger.info(f"   Position Monitor: 2s interval")
+        self.logger.info(f"   Position Monitor: 1s interval")
         self.logger.info(f"   Trading Cycle: 5s cooldown between cycles")
 
         await asyncio.sleep(5)
