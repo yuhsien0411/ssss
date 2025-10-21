@@ -55,7 +55,13 @@ class HedgeBot:
         self.last_grvt_position_call = 0
         self.last_lighter_position_call = 0
         self.grvt_rate_limit = 1.5  # 1.5 秒間隔，符合等級 3-4 限制（75-100 次/10秒）
-        self.lighter_rate_limit = 1.0  # 1 秒間隔，避免 Lighter 限制
+        
+        # Lighter 帳戶類型檢測
+        self.lighter_account_type = os.getenv('LIGHTER_ACCOUNT_TYPE', 'standard')  # 'standard' 或 'premium'
+        if self.lighter_account_type == 'premium':
+            self.lighter_rate_limit = 0.1  # 0.1 秒間隔，符合進階帳戶限制（24000 次/分鐘）
+        else:
+            self.lighter_rate_limit = 2.0  # 2 秒間隔，符合標準帳戶限制（60 次/分鐘）
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -1183,6 +1189,11 @@ class HedgeBot:
         # 啟動持倉監控任務
         self.position_monitor_task = asyncio.create_task(self.position_monitor())
         self.logger.info("✅ Position monitor task started")
+        
+        # 顯示速率限制設置
+        self.logger.info(f"📊 API Rate Limits:")
+        self.logger.info(f"   GRVT: {self.grvt_rate_limit}s interval (Level 3-4: 75-100 calls/10s)")
+        self.logger.info(f"   Lighter: {self.lighter_rate_limit}s interval ({self.lighter_account_type} account: {60 if self.lighter_account_type == 'standard' else 24000} calls/min)")
 
         await asyncio.sleep(5)
 
