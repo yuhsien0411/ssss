@@ -899,18 +899,22 @@ class HedgeBot:
                 if position_diff > Decimal('0.001'):
                     self.logger.warning(f"⚠️ Position mismatch detected: GRVT={grvt_pos}, Lighter={lighter_pos}, diff={position_diff}")
                     
-                    # 緊急對沖：只對沖不匹配的部分，避免重複對沖
+                    # 緊急對沖：修復不匹配的持倉
                     if position_diff > Decimal('0.001') and not self.waiting_for_lighter_fill:
-                        # 計算需要對沖的數量（不匹配的部分）
-                        if abs(grvt_pos) > abs(lighter_pos):
-                            # GRVT 持倉更大，需要在 Lighter 增加對沖
-                            lighter_side = 'sell' if grvt_pos > 0 else 'buy'
-                            hedge_quantity = abs(grvt_pos) - abs(lighter_pos)
-                        else:
-                            # Lighter 持倉更大，需要在 Lighter 減少持倉
-                            lighter_side = 'buy' if lighter_pos > 0 else 'sell'
-                            hedge_quantity = abs(lighter_pos) - abs(grvt_pos)
+                        # 正確的對沖邏輯：GRVT 和 Lighter 應該方向相反，總和為 0
+                        # 目標：grvt_pos + lighter_pos = 0
+                        # 所以：target_lighter_pos = -grvt_pos
+                        target_lighter_pos = -grvt_pos
+                        hedge_quantity = abs(target_lighter_pos - lighter_pos)
                         
+                        if target_lighter_pos > lighter_pos:
+                            # 需要增加 Lighter 持倉（買入）
+                            lighter_side = 'buy'
+                        else:
+                            # 需要減少 Lighter 持倉（賣出）
+                            lighter_side = 'sell'
+                        
+                        self.logger.warning(f"🚨 Emergency hedge: GRVT={grvt_pos} → Target Lighter={target_lighter_pos}, Current Lighter={lighter_pos}")
                         self.logger.warning(f"🚨 Emergency hedge: Correcting mismatch with {hedge_quantity} {lighter_side}")
                         
                         # 設置對沖參數
