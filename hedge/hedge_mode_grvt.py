@@ -228,14 +228,20 @@ class HedgeBot:
         try:
             order_data["avg_filled_price"] = (Decimal(order_data["filled_quote_amount"]) /
                                               Decimal(order_data["filled_base_amount"]))
+            
+            filled_amount = Decimal(order_data["filled_base_amount"])
+            old_position = self.lighter_position
+            
             if order_data["is_ask"]:
                 order_data["side"] = "SHORT"
                 order_type = "OPEN"
-                self.lighter_position -= Decimal(order_data["filled_base_amount"])
+                self.lighter_position -= filled_amount
+                self.logger.info(f"📊 Lighter position updated (SHORT): -{filled_amount} → {self.lighter_position} (was {old_position})")
             else:
                 order_data["side"] = "LONG"
                 order_type = "CLOSE"
-                self.lighter_position += Decimal(order_data["filled_base_amount"])
+                self.lighter_position += filled_amount
+                self.logger.info(f"📊 Lighter position updated (LONG): +{filled_amount} → {self.lighter_position} (was {old_position})")
             
             client_order_index = order_data["client_order_id"]
 
@@ -255,7 +261,81 @@ class HedgeBot:
             self.order_execution_complete = True
 
         except Exception as e:
-            self.logger.error(f"Error handling Lighter order result: {e}")
+            self.logger.error(f"❌ Error handling Lighter order result: {e}")
+            import traceback
+            self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+
+    async def sync_positions(self):
+        """強制同步持倉 - 從 API 查詢實際持倉並更新內部記錄"""
+        try:
+            self.logger.info("🔄 Syncing positions from APIs...")
+            
+            # 查詢 GRVT 實際持倉
+            try:
+                grvt_pos = await self.get_grvt_actual_position()
+                old_grvt_pos = self.grvt_position
+                self.grvt_position = grvt_pos
+                self.logger.info(f"📊 GRVT position synced: {old_grvt_pos} → {grvt_pos}")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to sync GRVT position: {e}")
+            
+            # 查詢 Lighter 實際持倉
+            try:
+                lighter_pos = await self.get_lighter_actual_position()
+                old_lighter_pos = self.lighter_position
+                self.lighter_position = lighter_pos
+                self.logger.info(f"📊 Lighter position synced: {old_lighter_pos} → {lighter_pos}")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to sync Lighter position: {e}")
+            
+            # 檢查同步後的持倉
+            position_diff = abs(self.grvt_position + self.lighter_position)
+            if position_diff > Decimal('0.01'):
+                self.logger.warning(f"⚠️ After sync, position diff still exists: {position_diff:.6f}")
+                self.logger.warning(f"⚠️ GRVT={self.grvt_position}, Lighter={self.lighter_position}")
+            else:
+                self.logger.info(f"✅ Positions synced successfully: diff={position_diff:.6f}")
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error syncing positions: {e}")
+            import traceback
+            self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+
+    async def get_grvt_actual_position(self) -> Decimal:
+        """查詢 GRVT 實際持倉"""
+        try:
+            # 使用 GRVT API 查詢持倉
+            positions = await self.grvt_client.get_positions()
+            if positions.success:
+                for position in positions.result:
+                    if position.contract_id == self.grvt_contract_id:
+                        return Decimal(str(position.size))
+            return Decimal('0')
+        except Exception as e:
+            self.logger.error(f"❌ Error getting GRVT position: {e}")
+            return self.grvt_position  # 返回當前記錄的持倉
+
+    async def get_lighter_actual_position(self) -> Decimal:
+        """查詢 Lighter 實際持倉"""
+        try:
+            # 使用 Lighter API 查詢持倉
+            from lighter.api.account_api import AccountApi
+            account_api = AccountApi(self.lighter_client.api_client)
+            
+            # 查詢賬戶資訊
+            account_response = await account_api.account()
+            if account_response and hasattr(account_response, 'account'):
+                account = account_response.account
+                if hasattr(account, 'positions') and account.positions:
+                    for position in account.positions:
+                        if hasattr(position, 'market_index') and position.market_index == self.lighter_market_index:
+                            # Lighter 持倉以 base amount 為單位
+                            base_amount = Decimal(str(position.base_amount)) / self.base_amount_multiplier
+                            return base_amount
+            return Decimal('0')
+        except Exception as e:
+            self.logger.error(f"❌ Error getting Lighter position: {e}")
+            return self.lighter_position  # 返回當前記錄的持倉
 
     async def reset_lighter_order_book(self):
         """Reset Lighter order book state."""
@@ -1119,6 +1199,17 @@ class HedgeBot:
 
             # Close remaining position
             self.logger.info(f"[STEP 3] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
+            
+            # 檢查持倉是否完全對沖
+            position_diff = abs(self.grvt_position + self.lighter_position)
+            if position_diff > Decimal('0.01'):
+                self.logger.warning(f"⚠️ Position mismatch detected: diff={position_diff:.6f}")
+                self.logger.warning(f"⚠️ GRVT={self.grvt_position}, Lighter={self.lighter_position}")
+                # 強制同步持倉
+                await self.sync_positions()
+            else:
+                self.logger.info(f"✅ Positions balanced: diff={position_diff:.6f}")
+            
             self.order_execution_complete = False
             self.waiting_for_lighter_fill = False
             if self.grvt_position == 0:
