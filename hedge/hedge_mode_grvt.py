@@ -55,8 +55,8 @@ class HedgeBot:
         self.last_grvt_position_call = 0
         self.last_lighter_position_call = 0
         # GRVT Level 3-4: 讀取操作 75-100 次/10秒 = 每秒 7.5-10 次
-        # 設置為 0.5 秒間隔 = 每秒 2 次，遠低於限制
-        self.grvt_rate_limit = 0.5
+        # 設置為 1.0 秒間隔 = 每秒 1 次，更保守的速率限制
+        self.grvt_rate_limit = 1.0
         
         # Lighter 帳戶類型檢測
         self.lighter_account_type = os.getenv('LIGHTER_ACCOUNT_TYPE', 'standard')  # 'standard' 或 'premium'
@@ -1253,9 +1253,10 @@ class HedgeBot:
         self.logger.info("✅ Position monitor task started")
         
         # 顯示速率限制設置
-        self.logger.info(f"📊 API Rate Limits:")
+        self.logger.info(f"📊 API Rate Limits (保守模式):")
         self.logger.info(f"   GRVT: {self.grvt_rate_limit}s interval (~{int(60/self.grvt_rate_limit)} calls/min)")
         self.logger.info(f"   GRVT Level 3-4: 允許 75-100 次讀取操作/10秒 (450-600 calls/min)")
+        self.logger.info(f"   ⚠️ 已調整為保守速率限制以避免 429 錯誤")
         if self.lighter_account_type == 'premium':
             self.logger.info(f"   Lighter: {self.lighter_rate_limit}s interval (premium: 24000 calls/min)")
         else:
