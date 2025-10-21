@@ -733,7 +733,7 @@ class HedgeBot:
             raise Exception(f"Failed to place order: {order_result.error_message}")
 
     async def place_grvt_post_only_order(self, side: str, quantity: Decimal):
-        """Place a post-only order on GRVT using REST API polling for status."""
+        """Place a post-only order on GRVT using position change detection."""
         if not self.grvt_client:
             raise Exception("GRVT client not initialized")
 
@@ -745,105 +745,76 @@ class HedgeBot:
         
         while retry_count < max_retries and not self.stop_flag:
             try:
+                # 記錄下單前持倉
+                position_before = await self.get_grvt_actual_position()
+                self.logger.info(f"📊 Position before order: {position_before}")
+                
                 # 下單
                 order_id, order_price = await self.place_bbo_order(side, quantity)
                 self.logger.info(f"📝 GRVT order placed: {order_id} @ {order_price}")
                 
-                # 使用 REST API 輪詢訂單狀態
-                start_time = time.time()
-                timeout_duration = 30 if retry_count == 0 else 20  # 增加超時時間以減少重試
-                poll_interval = 1.5  # 每 1.5 秒查詢一次，平衡速度和速率限制
-                last_poll_time = start_time - poll_interval  # 立即開始第一次查詢
-                last_status_log_time = start_time
+                # 等待一段時間讓訂單有機會成交
+                wait_duration = 8 if retry_count == 0 else 5
+                self.logger.info(f"⏳ Waiting {wait_duration}s for order to fill...")
+                await asyncio.sleep(wait_duration)
                 
-                while not self.stop_flag:
-                    current_time = time.time()
-                    elapsed = current_time - start_time
-                    
-                    # 使用 REST API 查詢訂單狀態
-                    if current_time - last_poll_time >= poll_interval:
-                        try:
-                            # 直接使用 GRVT SDK 的 fetch_order 方法
-                            order_response = await self.grvt_client.client.fetch_order(id=order_id)
-                            
-                            if order_response and 'result' in order_response:
-                                order_data = order_response['result']
-                                order_status = order_data.get('state', 'UNKNOWN')
-                                
-                                # 每 6 秒記錄一次狀態（減少日誌輸出）
-                                if current_time - last_status_log_time >= 6:
-                                    self.logger.info(f"⏳ Waiting for GRVT order fill... ({elapsed:.1f}s / {timeout_duration}s) Status: {order_status}")
-                                    last_status_log_time = current_time
-                                
-                                # 處理不同狀態
-                                if order_status == 'FILLED':
-                                    self.logger.info(f"✅ Order filled successfully on attempt {retry_count + 1}")
-                                    # 更新內部持倉
-                                    filled_size = Decimal(str(order_data.get('filled_size', quantity)))
-                                    if side.lower() == 'buy':
-                                        self.grvt_position += filled_size
-                                    else:
-                                        self.grvt_position -= filled_size
-                                    
-                                    self.logger.info(f"📊 GRVT position updated: {self.grvt_position}")
-                                    
-                                    # 觸發 Lighter 對沖
-                                    self.waiting_for_lighter_fill = True
-                                    self.current_lighter_side = 'sell' if side.lower() == 'buy' else 'buy'
-                                    self.current_lighter_quantity = filled_size
-                                    self.current_lighter_price = order_price
-                                    
-                                    self.logger.info(f"🔔 Triggering Lighter hedge: {self.current_lighter_side} {filled_size} @ {order_price}")
-                                    self.logger.info(f"🔔 waiting_for_lighter_fill set to: {self.waiting_for_lighter_fill}")
-                                    
-                                    return  # 成功成交，退出函數
-                                    
-                                elif order_status in ['CANCELED', 'REJECTED', 'EXPIRED']:
-                                    self.logger.warning(f"❌ Order {order_status}, retrying...")
-                                    break  # 跳出循環，重試
-                                    
-                                elif order_status in ['OPEN', 'PENDING', 'PARTIALLY_FILLED']:
-                                    # 檢查是否超時
-                                    if elapsed > timeout_duration:
-                                        self.logger.warning(f"⏰ Order timeout after {timeout_duration}s, canceling order {order_id}...")
-                                        try:
-                                            cancel_result = await self.grvt_client.cancel_order(order_id)
-                                            if cancel_result.success:
-                                                self.logger.warning(f"✅ Order canceled successfully")
-                                            else:
-                                                self.logger.error(f"❌ Error canceling order: {cancel_result.error_message}")
-                                        except Exception as e:
-                                            self.logger.error(f"❌ Error canceling order: {e}")
-                                        break  # 跳出循環，重試
-                            
-                            last_poll_time = current_time
-                            
-                        except Exception as e:
-                            self.logger.debug(f"⚠️ Error querying order status: {e}")
-                            last_poll_time = current_time
-                    
-                    await asyncio.sleep(0.1)  # 短暫等待後繼續
-                    
-                    # 檢查是否已經超時太久
-                    if elapsed > timeout_duration + 5:
-                        self.logger.error(f"❌ Timeout waiting for order after {elapsed:.1f}s")
-                        break
+                # 撤銷所有掛單（無論是否成交）
+                self.logger.info(f"🗑️ Canceling all open orders...")
+                try:
+                    cancel_result = await self.grvt_client.cancel_all_orders()
+                    if cancel_result.success:
+                        self.logger.info(f"✅ All orders canceled successfully")
+                    else:
+                        self.logger.warning(f"⚠️ Cancel all orders returned: {cancel_result.error_message}")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Error canceling orders: {e}")
                 
-                # 增加重試計數
-                retry_count += 1
-                if retry_count < max_retries:
-                    self.logger.warning(f"⚠️ Order not filled, retrying ({retry_count}/{max_retries})...")
-                    await asyncio.sleep(2)  # 重試前等待 2 秒
+                # 查詢下單後持倉
+                await asyncio.sleep(1)  # 等待 1 秒讓持倉更新
+                position_after = await self.get_grvt_actual_position()
+                self.logger.info(f"📊 Position after order: {position_after}")
+                
+                # 計算持倉變化
+                position_change = position_after - position_before
+                self.logger.info(f"📊 Position change: {position_change}")
+                
+                # 如果持倉有變化，表示訂單已成交
+                if abs(position_change) >= Decimal('0.001'):  # 允許小誤差
+                    filled_size = abs(position_change)
+                    self.logger.info(f"✅ Order filled: {filled_size} (detected by position change)")
+                    
+                    # 更新內部持倉
+                    self.grvt_position = position_after
+                    self.logger.info(f"📊 GRVT position updated: {self.grvt_position}")
+                    
+                    # 觸發 Lighter 對沖
+                    self.waiting_for_lighter_fill = True
+                    self.current_lighter_side = 'sell' if side.lower() == 'buy' else 'buy'
+                    self.current_lighter_quantity = filled_size
+                    self.current_lighter_price = order_price
+                    
+                    self.logger.info(f"🔔 Triggering Lighter hedge: {self.current_lighter_side} {filled_size} @ {order_price}")
+                    
+                    return  # 成功成交，退出函數
                 else:
-                    self.logger.error(f"❌ Failed to fill order after {max_retries} attempts")
+                    self.logger.warning(f"⚠️ No position change detected, order likely not filled")
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        self.logger.warning(f"⚠️ Retrying ({retry_count}/{max_retries})...")
+                        await asyncio.sleep(2)
+                    else:
+                        self.logger.error(f"❌ Failed to fill order after {max_retries} attempts")
+                        return
                     
             except Exception as e:
                 retry_count += 1
                 self.logger.error(f"❌ Error placing order (attempt {retry_count}): {e}")
+                import traceback
+                self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
                 if retry_count < max_retries:
                     await asyncio.sleep(2)
                 else:
-                    break
+                    return
 
 
     def handle_grvt_order_update(self, order_data):
