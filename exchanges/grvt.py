@@ -308,7 +308,7 @@ class GrvtClient(BaseExchangeClient):
                 active_orders = await self.get_active_orders(contract_id)
                 active_open_orders = 0
                 for order in active_orders:
-                    if order.side == self.config.direction:
+                    if order.side == direction:
                         active_open_orders += 1
                 if active_open_orders > 1:
                     self.logger.log(f"[OPEN] ERROR: Active open orders abnormal: {active_open_orders}", "ERROR")

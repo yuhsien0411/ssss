@@ -605,7 +605,8 @@ class HedgeBot:
             'contract_id': '',  # Will be set when we get contract info
             'quantity': self.order_quantity,
             'tick_size': Decimal('0.01'),  # Will be updated when we get contract info
-            'close_order_side': 'sell'  # Default, will be updated based on strategy
+            'close_order_side': 'sell',  # Default, will be updated based on strategy
+            'direction': 'buy'  # Add direction attribute for GRVT client
         }
 
         # Wrap in Config class for GRVT client
