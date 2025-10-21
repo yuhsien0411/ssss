@@ -75,7 +75,8 @@ class HedgeBot:
 
         # Setup logger
         self.logger = logging.getLogger(f"hedge_bot_{ticker}")
-        self.logger.setLevel(logging.INFO)
+        # 暫時啟用 DEBUG 來檢查 position 數據
+        self.logger.setLevel(logging.DEBUG)
 
         # Clear any existing handlers to avoid duplicates
         self.logger.handlers.clear()
@@ -809,10 +810,12 @@ class HedgeBot:
             self.last_grvt_position_call = current_time
             
             if positions:
+                self.logger.debug(f"🔍 GRVT positions raw data: {positions}")
                 for position in positions:
                     if position.get('instrument') == self.grvt_contract_id:
                         position_size = Decimal(str(position.get('size', '0')))
-                        self.logger.info(f"📊 GRVT actual position: {position_size}")
+                        self.logger.info(f"📊 GRVT actual position: {position_size} (from API)")
+                        self.logger.debug(f"🔍 GRVT position details: {position}")
                         return position_size
             
             self.logger.info("📊 GRVT actual position: 0 (no positions found)")
@@ -849,11 +852,14 @@ class HedgeBot:
             
             if account_data and account_data.accounts:
                 account = account_data.accounts[0]
+                self.logger.debug(f"🔍 Lighter account data: {account}")
                 if hasattr(account, 'positions') and account.positions:
+                    self.logger.debug(f"🔍 Lighter positions raw: {account.positions}")
                     for position in account.positions:
                         if int(position.market_id) == self.lighter_market_index:
                             position_size = Decimal(str(position.position))
-                            self.logger.info(f"📊 Lighter actual position: {position_size}")
+                            self.logger.info(f"📊 Lighter actual position: {position_size} (from API)")
+                            self.logger.debug(f"🔍 Lighter position details: market_id={position.market_id}, position={position.position}")
                             return position_size
             
             self.logger.info(f"📊 Lighter actual position: 0 (no positions found)")
