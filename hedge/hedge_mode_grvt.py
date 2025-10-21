@@ -54,7 +54,7 @@ class HedgeBot:
         # API 速率限制管理
         self.last_grvt_position_call = 0
         self.last_lighter_position_call = 0
-        self.grvt_rate_limit = 0.6  # 0.6 秒間隔，符合 GRVT 等級 3-4 限制（100 次/分鐘）
+        self.grvt_rate_limit = 2.0  # 2.0 秒間隔，保守設置避免 429 錯誤（30 次/分鐘）
         
         # Lighter 帳戶類型檢測
         self.lighter_account_type = os.getenv('LIGHTER_ACCOUNT_TYPE', 'standard')  # 'standard' 或 'premium'
@@ -923,8 +923,8 @@ class HedgeBot:
                 else:
                     self.logger.debug(f"✅ Positions match: GRVT={grvt_pos}, Lighter={lighter_pos}")
                 
-                # 等待 1 秒，更頻繁地檢查持倉以確保完全匹配
-                await asyncio.sleep(1.0)
+                # 等待 2.5 秒，與 GRVT 速率限制對齊，避免 API 429 錯誤
+                await asyncio.sleep(2.5)
                 
             except Exception as e:
                 self.logger.error(f"❌ Error in position monitor: {e}")
