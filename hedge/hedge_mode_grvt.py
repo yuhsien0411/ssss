@@ -910,6 +910,23 @@ class HedgeBot:
                         
                         # 立即執行市價對沖
                         await self.place_lighter_market_order(lighter_side, hedge_quantity, Decimal('0'))
+                    
+                    # 如果 Lighter 有持倉但 GRVT 沒有，立即市價對沖 Lighter
+                    elif lighter_pos != Decimal('0') and not self.waiting_for_lighter_fill:
+                        self.logger.warning(f"🚨 Emergency hedge: Lighter={lighter_pos}, immediately hedging with market order")
+                        
+                        # 立即觸發市價對沖 Lighter
+                        lighter_side = 'sell' if lighter_pos > 0 else 'buy'
+                        hedge_quantity = abs(lighter_pos)
+                        
+                        # 設置對沖參數
+                        self.current_lighter_side = lighter_side
+                        self.current_lighter_quantity = hedge_quantity
+                        self.current_lighter_price = Decimal('0')  # 市價單
+                        self.waiting_for_lighter_fill = True
+                        
+                        # 立即執行市價對沖
+                        await self.place_lighter_market_order(lighter_side, hedge_quantity, Decimal('0'))
                         
                 else:
                     self.logger.debug(f"✅ Positions match: GRVT={grvt_pos}, Lighter={lighter_pos}")
@@ -1258,11 +1275,31 @@ class HedgeBot:
                 
                 # 備用觸發機制：檢查持倉變化，立即市價對沖
                 current_grvt_pos = await self.get_grvt_position()
+                current_lighter_pos = await self.get_lighter_position()
+                
+                # 檢查 GRVT 持倉
                 if current_grvt_pos != Decimal('0') and not self.waiting_for_lighter_fill:
                     self.logger.warning(f"⚠️ Backup hedge trigger: GRVT position={current_grvt_pos}, immediately hedging with market order")
                     # 立即觸發市價對沖
                     lighter_side = 'sell' if current_grvt_pos > 0 else 'buy'
                     hedge_quantity = abs(current_grvt_pos)
+                    
+                    # 設置對沖參數
+                    self.current_lighter_side = lighter_side
+                    self.current_lighter_quantity = hedge_quantity
+                    self.current_lighter_price = Decimal('0')  # 市價單
+                    self.waiting_for_lighter_fill = True
+                    
+                    # 立即執行市價對沖
+                    await self.place_lighter_market_order(lighter_side, hedge_quantity, Decimal('0'))
+                    break
+                
+                # 檢查 Lighter 持倉
+                elif current_lighter_pos != Decimal('0') and not self.waiting_for_lighter_fill:
+                    self.logger.warning(f"⚠️ Backup hedge trigger: Lighter position={current_lighter_pos}, immediately hedging with market order")
+                    # 立即觸發市價對沖 Lighter
+                    lighter_side = 'sell' if current_lighter_pos > 0 else 'buy'
+                    hedge_quantity = abs(current_lighter_pos)
                     
                     # 設置對沖參數
                     self.current_lighter_side = lighter_side
@@ -1324,11 +1361,31 @@ class HedgeBot:
                 
                 # 備用觸發機制：檢查持倉變化，立即市價對沖
                 current_grvt_pos = await self.get_grvt_position()
+                current_lighter_pos = await self.get_lighter_position()
+                
+                # 檢查 GRVT 持倉
                 if current_grvt_pos != Decimal('0') and not self.waiting_for_lighter_fill:
                     self.logger.warning(f"⚠️ Backup hedge trigger: GRVT position={current_grvt_pos}, immediately hedging with market order")
                     # 立即觸發市價對沖
                     lighter_side = 'sell' if current_grvt_pos > 0 else 'buy'
                     hedge_quantity = abs(current_grvt_pos)
+                    
+                    # 設置對沖參數
+                    self.current_lighter_side = lighter_side
+                    self.current_lighter_quantity = hedge_quantity
+                    self.current_lighter_price = Decimal('0')  # 市價單
+                    self.waiting_for_lighter_fill = True
+                    
+                    # 立即執行市價對沖
+                    await self.place_lighter_market_order(lighter_side, hedge_quantity, Decimal('0'))
+                    break
+                
+                # 檢查 Lighter 持倉
+                elif current_lighter_pos != Decimal('0') and not self.waiting_for_lighter_fill:
+                    self.logger.warning(f"⚠️ Backup hedge trigger: Lighter position={current_lighter_pos}, immediately hedging with market order")
+                    # 立即觸發市價對沖 Lighter
+                    lighter_side = 'sell' if current_lighter_pos > 0 else 'buy'
+                    hedge_quantity = abs(current_lighter_pos)
                     
                     # 設置對沖參數
                     self.current_lighter_side = lighter_side
@@ -1377,11 +1434,31 @@ class HedgeBot:
                 
                 # 備用觸發機制：檢查持倉變化，立即市價對沖
                 current_grvt_pos = await self.get_grvt_position()
+                current_lighter_pos = await self.get_lighter_position()
+                
+                # 檢查 GRVT 持倉
                 if current_grvt_pos != Decimal('0') and not self.waiting_for_lighter_fill:
                     self.logger.warning(f"⚠️ Backup hedge trigger: GRVT position={current_grvt_pos}, immediately hedging with market order")
                     # 立即觸發市價對沖
                     lighter_side = 'sell' if current_grvt_pos > 0 else 'buy'
                     hedge_quantity = abs(current_grvt_pos)
+                    
+                    # 設置對沖參數
+                    self.current_lighter_side = lighter_side
+                    self.current_lighter_quantity = hedge_quantity
+                    self.current_lighter_price = Decimal('0')  # 市價單
+                    self.waiting_for_lighter_fill = True
+                    
+                    # 立即執行市價對沖
+                    await self.place_lighter_market_order(lighter_side, hedge_quantity, Decimal('0'))
+                    break
+                
+                # 檢查 Lighter 持倉
+                elif current_lighter_pos != Decimal('0') and not self.waiting_for_lighter_fill:
+                    self.logger.warning(f"⚠️ Backup hedge trigger: Lighter position={current_lighter_pos}, immediately hedging with market order")
+                    # 立即觸發市價對沖 Lighter
+                    lighter_side = 'sell' if current_lighter_pos > 0 else 'buy'
+                    hedge_quantity = abs(current_lighter_pos)
                     
                     # 設置對沖參數
                     self.current_lighter_side = lighter_side
