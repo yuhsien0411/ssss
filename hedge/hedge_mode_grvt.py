@@ -721,97 +721,109 @@ class HedgeBot:
             raise Exception(f"Failed to place order: {order_result.error_message}")
 
     async def place_grvt_post_only_order(self, side: str, quantity: Decimal):
-        """Place a post-only order on GRVT with improved fill strategy."""
+        """Place a post-only order on GRVT using REST API polling for status."""
         if not self.grvt_client:
             raise Exception("GRVT client not initialized")
 
-        self.grvt_order_status = None
         self.logger.info(f"[OPEN] [GRVT] [{side}] Placing GRVT POST-ONLY order")
         
-        # 重試機制：最多重試 3 次，每次調整價格
+        # 重試機制：最多重試 3 次
         max_retries = 3
         retry_count = 0
         
         while retry_count < max_retries and not self.stop_flag:
             try:
+                # 下單
                 order_id, order_price = await self.place_bbo_order(side, quantity)
                 self.logger.info(f"📝 GRVT order placed: {order_id} @ {order_price}")
-                start_time = time.time()
                 
-                # 等待成交，縮短超時時間
-                timeout_duration = 8 if retry_count == 0 else 5  # 第一次給更多時間
+                # 使用 REST API 輪詢訂單狀態
+                start_time = time.time()
+                timeout_duration = 15 if retry_count == 0 else 10  # 增加超時時間
+                poll_interval = 1.0  # 每 1 秒查詢一次
+                last_poll_time = start_time - poll_interval  # 立即開始第一次查詢
                 last_status_log_time = start_time
                 
                 while not self.stop_flag:
                     current_time = time.time()
                     elapsed = current_time - start_time
                     
-                    # 每 2 秒記錄一次狀態
-                    if current_time - last_status_log_time >= 2:
-                        self.logger.info(f"⏳ Waiting for GRVT order fill... ({elapsed:.1f}s / {timeout_duration}s) Status: {self.grvt_order_status}")
-                        last_status_log_time = current_time
+                    # 使用 REST API 查詢訂單狀態
+                    if current_time - last_poll_time >= poll_interval:
+                        try:
+                            # 直接使用 GRVT SDK 的 fetch_order 方法
+                            order_response = await self.grvt_client.client.fetch_order(id=order_id)
+                            
+                            if order_response and 'result' in order_response:
+                                order_data = order_response['result']
+                                order_status = order_data.get('state', 'UNKNOWN')
+                                
+                                # 每 2 秒記錄一次狀態
+                                if current_time - last_status_log_time >= 2:
+                                    self.logger.info(f"⏳ Waiting for GRVT order fill... ({elapsed:.1f}s / {timeout_duration}s) Status: {order_status}")
+                                    last_status_log_time = current_time
+                                
+                                # 處理不同狀態
+                                if order_status == 'FILLED':
+                                    self.logger.info(f"✅ Order filled successfully on attempt {retry_count + 1}")
+                                    # 更新內部持倉
+                                    filled_size = Decimal(str(order_data.get('filled_size', quantity)))
+                                    if side.lower() == 'buy':
+                                        self.grvt_position += filled_size
+                                    else:
+                                        self.grvt_position -= filled_size
+                                    
+                                    # 觸發 Lighter 對沖
+                                    self.waiting_for_lighter_fill = True
+                                    self.current_lighter_side = 'sell' if side.lower() == 'buy' else 'buy'
+                                    self.current_lighter_quantity = filled_size
+                                    self.current_lighter_price = order_price
+                                    return  # 成功成交，退出函數
+                                    
+                                elif order_status in ['CANCELED', 'REJECTED', 'EXPIRED']:
+                                    self.logger.warning(f"❌ Order {order_status}, retrying...")
+                                    break  # 跳出循環，重試
+                                    
+                                elif order_status in ['OPEN', 'PENDING', 'PARTIALLY_FILLED']:
+                                    # 檢查是否超時
+                                    if elapsed > timeout_duration:
+                                        self.logger.warning(f"⏰ Order timeout after {timeout_duration}s, canceling order {order_id}...")
+                                        try:
+                                            cancel_result = await self.grvt_client.cancel_order(order_id)
+                                            if cancel_result.success:
+                                                self.logger.warning(f"✅ Order canceled successfully")
+                                            else:
+                                                self.logger.error(f"❌ Error canceling order: {cancel_result.error_message}")
+                                        except Exception as e:
+                                            self.logger.error(f"❌ Error canceling order: {e}")
+                                        break  # 跳出循環，重試
+                            
+                            last_poll_time = current_time
+                            
+                        except Exception as e:
+                            self.logger.debug(f"⚠️ Error querying order status: {e}")
+                            last_poll_time = current_time
                     
-                    if self.grvt_order_status == 'CANCELED':
-                        self.logger.warning(f"❌ Order was canceled externally")
-                        self.grvt_order_status = None
-                        break  # 跳出內層循環，重新下單
-                    elif self.grvt_order_status in ['NEW', 'OPEN', 'PENDING', 'CANCELING', 'PARTIALLY_FILLED']:
-                        await asyncio.sleep(0.1)  # 縮短檢查間隔到 100ms
-                        if elapsed > timeout_duration:
-                            try:
-                                # 取消訂單
-                                self.logger.warning(f"⏰ Order timeout after {timeout_duration}s, canceling order {order_id}...")
-                                cancel_result = await self.grvt_client.cancel_order(order_id)
-                                if cancel_result.success:
-                                    self.grvt_order_status = 'CANCELED'
-                                    self.logger.warning(f"✅ Order canceled successfully, retrying...")
-                                else:
-                                    self.logger.error(f"❌ Error canceling GRVT order: {cancel_result.error_message}")
-                                    # 強制標記為取消，避免卡住
-                                    self.grvt_order_status = 'CANCELED'
-                            except Exception as e:
-                                self.logger.error(f"❌ Error canceling GRVT order: {e}")
-                                # 強制標記為取消，避免卡住
-                                self.grvt_order_status = 'CANCELED'
-                            break
-                    elif self.grvt_order_status == 'FILLED':
-                        self.logger.info(f"✅ Order filled successfully on attempt {retry_count + 1}")
-                        return  # 成功成交，退出函數
-                    else:
-                        if self.grvt_order_status is not None:
-                            self.logger.error(f"❌ Unknown GRVT order status: {self.grvt_order_status}")
-                            break
-                        else:
-                            # Wait for order status update
-                            await asyncio.sleep(0.1)  # 縮短檢查間隔到 100ms
-                            # Check for timeout if no status update
-                            if elapsed > timeout_duration + 5:
-                                self.logger.error(f"❌ Timeout waiting for order status update after {elapsed:.1f}s")
-                                # 強制取消訂單避免卡住
-                                try:
-                                    self.logger.warning(f"🔧 Force canceling order {order_id}...")
-                                    await self.grvt_client.cancel_order(order_id)
-                                except:
-                                    pass
-                                break
-                
-                # 如果沒有成交，增加重試計數
-                if self.grvt_order_status != 'FILLED':
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        self.logger.warning(f"⚠️ Order not filled, retrying ({retry_count}/{max_retries})...")
-                        await asyncio.sleep(1)  # 短暫等待後重試
-                    else:
-                        self.logger.error(f"❌ Failed to fill order after {max_retries} attempts")
+                    await asyncio.sleep(0.1)  # 短暫等待後繼續
+                    
+                    # 檢查是否已經超時太久
+                    if elapsed > timeout_duration + 5:
+                        self.logger.error(f"❌ Timeout waiting for order after {elapsed:.1f}s")
                         break
+                
+                # 增加重試計數
+                retry_count += 1
+                if retry_count < max_retries:
+                    self.logger.warning(f"⚠️ Order not filled, retrying ({retry_count}/{max_retries})...")
+                    await asyncio.sleep(2)  # 重試前等待 2 秒
                 else:
-                    break  # 成功成交，退出重試循環
+                    self.logger.error(f"❌ Failed to fill order after {max_retries} attempts")
                     
             except Exception as e:
                 retry_count += 1
                 self.logger.error(f"❌ Error placing order (attempt {retry_count}): {e}")
                 if retry_count < max_retries:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
                 else:
                     break
 
