@@ -1324,8 +1324,9 @@ class HedgeBot:
                         continue  # 下一輪循環會執行對沖
 
                 await asyncio.sleep(0.1)
-                if time.time() - start_time > 60:  # 縮短超時時間到 60 秒
-                    self.logger.error("❌ Timeout waiting for trade completion")
+                if time.time() - start_time > 30:  # 縮短超時時間到 30 秒
+                    self.logger.warning("⚠️ Timeout waiting for trade completion, continuing to next iteration")
+                    self.order_execution_complete = True  # 強制標記為完成，繼續下一輪
                     break
 
             if self.stop_flag:
