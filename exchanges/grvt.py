@@ -320,11 +320,13 @@ class GrvtClient(BaseExchangeClient):
             if best_bid <= 0 or best_ask <= 0:
                 return OrderResult(success=False, error_message='Invalid bid/ask prices')
 
-            # Determine order side and price
+            # Determine order side and price - 更激進的價格策略
             if direction == 'buy':
-                order_price = best_ask - self.config.tick_size
+                # 買單：使用最佳買價 + 2個tick，更接近市場
+                order_price = best_bid + (self.config.tick_size * 2)
             elif direction == 'sell':
-                order_price = best_bid + self.config.tick_size
+                # 賣單：使用最佳賣價 - 2個tick，更接近市場
+                order_price = best_ask - (self.config.tick_size * 2)
             else:
                 raise Exception(f"[OPEN] Invalid direction: {direction}")
 
