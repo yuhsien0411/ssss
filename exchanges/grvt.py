@@ -316,19 +316,25 @@ class GrvtClient(BaseExchangeClient):
 
             # Get current market prices
             best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+            
+            # 添加調試日誌
+            self.logger.log(f"[OPEN] Market prices - Best bid: {best_bid}, Best ask: {best_ask}", "INFO")
 
             if best_bid <= 0 or best_ask <= 0:
                 return OrderResult(success=False, error_message='Invalid bid/ask prices')
 
             # Determine order side and price - 更激進的價格策略
             if direction == 'buy':
-                # 買單：使用最佳買價 + 1個tick，稍微保守一些
-                order_price = best_bid + (self.config.tick_size * 1)
+                # 買單：直接使用最佳買價，最激進策略
+                order_price = best_bid
             elif direction == 'sell':
-                # 賣單：使用最佳賣價 - 1個tick，稍微保守一些
-                order_price = best_ask - (self.config.tick_size * 1)
+                # 賣單：直接使用最佳賣價，最激進策略
+                order_price = best_ask
             else:
                 raise Exception(f"[OPEN] Invalid direction: {direction}")
+            
+            # 添加訂單價格調試日誌
+            self.logger.log(f"[OPEN] Order price - Direction: {direction}, Price: {order_price}", "INFO")
 
             # Place the order using GRVT SDK
             try:
