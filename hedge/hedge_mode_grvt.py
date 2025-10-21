@@ -42,7 +42,7 @@ class HedgeBot:
         self.grvt_position = Decimal('0')
         self.lighter_position = Decimal('0')
         self.current_order = {}
-
+        
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
         self.log_filename = f"logs/grvt_{ticker}_hedge_mode_log.txt"
@@ -254,7 +254,7 @@ class HedgeBot:
                 order_type = "CLOSE"
                 self.lighter_position += filled_amount
                 self.logger.info(f"📊 Lighter position updated (LONG): +{filled_amount} → {self.lighter_position} (was {old_position})")
-            
+
             client_order_index = order_data["client_order_id"]
 
             self.logger.info(f"[{client_order_index}] [{order_type}] [Lighter] [FILLED]: "
@@ -619,7 +619,7 @@ class HedgeBot:
 
     def initialize_lighter_client(self):
         """Initialize the Lighter client."""
-        if self.lighter_client is None:
+        if self.lighter_client is None:            
             api_key_private_key = os.getenv('API_KEY_PRIVATE_KEY')
             if not api_key_private_key:
                 raise Exception("API_KEY_PRIVATE_KEY environment variable not set")
@@ -752,7 +752,7 @@ class HedgeBot:
                 # 使用 REST API 輪詢訂單狀態
                 start_time = time.time()
                 timeout_duration = 30 if retry_count == 0 else 20  # 增加超時時間以減少重試
-                poll_interval = 3.0  # 每 3 秒查詢一次，避免 API 速率限制
+                poll_interval = 1.5  # 每 1.5 秒查詢一次，平衡速度和速率限制
                 last_poll_time = start_time - poll_interval  # 立即開始第一次查詢
                 last_status_log_time = start_time
                 
@@ -861,7 +861,7 @@ class HedgeBot:
         self.current_lighter_side = lighter_side
         self.current_lighter_quantity = filled_size
         self.current_lighter_price = price
-
+        
         self.lighter_order_info = {
             'lighter_side': lighter_side,
             'quantity': filled_size,
@@ -869,7 +869,6 @@ class HedgeBot:
         }
 
         self.waiting_for_lighter_fill = True
-
 
     async def place_lighter_market_order(self, lighter_side: str, quantity: Decimal, price: Decimal):
         if not self.lighter_client:
@@ -1047,7 +1046,7 @@ class HedgeBot:
                     order_type = "OPEN"
                 else:
                     order_type = "CLOSE"
-                
+
                 if status == 'CANCELED' and filled_size > 0:
                     status = 'FILLED'
 
@@ -1186,7 +1185,7 @@ class HedgeBot:
                         self.current_lighter_price
                     )
                     break
-
+                
                 await asyncio.sleep(0.01)
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
@@ -1219,7 +1218,7 @@ class HedgeBot:
                         self.current_lighter_price
                     )
                     break
-
+                
                 await asyncio.sleep(0.01)
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
@@ -1265,7 +1264,7 @@ class HedgeBot:
                         self.current_lighter_price
                     )
                     break
-
+                
                 await asyncio.sleep(0.01)
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
