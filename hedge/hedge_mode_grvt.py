@@ -804,6 +804,10 @@ class HedgeBot:
             return Decimal('0')
             
         except Exception as e:
+            # 如果是速率限制錯誤，不記錄錯誤，直接返回 0
+            if "429" in str(e) or "rate limit" in str(e).lower():
+                self.logger.debug(f"GRVT API rate limit, using cached position: 0")
+                return Decimal('0')
             self.logger.error(f"❌ Error fetching GRVT position: {e}")
             return Decimal('0')
 
@@ -832,6 +836,10 @@ class HedgeBot:
             return Decimal('0')
             
         except Exception as e:
+            # 如果是速率限制錯誤，不記錄錯誤，直接返回 0
+            if "429" in str(e) or "rate limit" in str(e).lower() or "Too Many Requests" in str(e):
+                self.logger.debug(f"Lighter API rate limit, using cached position: 0")
+                return Decimal('0')
             self.logger.error(f"❌ Error fetching Lighter position: {e}")
             return Decimal('0')
 
@@ -1187,7 +1195,7 @@ class HedgeBot:
                     )
                     break
 
-                await asyncio.sleep(0.1)  # 每 100ms 檢查一次持倉
+                await asyncio.sleep(1.0)  # 每 1 秒檢查一次持倉，避免 API 速率限制
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
