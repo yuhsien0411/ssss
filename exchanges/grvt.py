@@ -323,18 +323,20 @@ class GrvtClient(BaseExchangeClient):
             if best_bid <= 0 or best_ask <= 0:
                 return OrderResult(success=False, error_message='Invalid bid/ask prices')
 
-            # Determine order side and price - 更激進的價格策略
+            # Determine order side and price - 更接近市場價的策略
             if direction == 'buy':
-                # 買單：直接使用最佳買價，最激進策略
-                order_price = best_bid
+                # 買單：使用 best_bid + 50% spread，更容易成交
+                spread = best_ask - best_bid
+                order_price = best_bid + (spread * Decimal('0.5'))
             elif direction == 'sell':
-                # 賣單：直接使用最佳賣價，最激進策略
-                order_price = best_ask
+                # 賣單：使用 best_ask - 50% spread，更容易成交
+                spread = best_ask - best_bid
+                order_price = best_ask - (spread * Decimal('0.5'))
             else:
                 raise Exception(f"[OPEN] Invalid direction: {direction}")
             
             # 添加訂單價格調試日誌
-            self.logger.log(f"[OPEN] Order price - Direction: {direction}, Price: {order_price}", "INFO")
+            self.logger.log(f"[OPEN] Spread: {spread:.2f}, Order price - Direction: {direction}, Price: {order_price}", "INFO")
 
             # Place the order using GRVT SDK
             try:
