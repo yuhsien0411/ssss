@@ -785,11 +785,17 @@ class HedgeBot:
                                     else:
                                         self.grvt_position -= filled_size
                                     
+                                    self.logger.info(f"📊 GRVT position updated: {self.grvt_position}")
+                                    
                                     # 觸發 Lighter 對沖
                                     self.waiting_for_lighter_fill = True
                                     self.current_lighter_side = 'sell' if side.lower() == 'buy' else 'buy'
                                     self.current_lighter_quantity = filled_size
                                     self.current_lighter_price = order_price
+                                    
+                                    self.logger.info(f"🔔 Triggering Lighter hedge: {self.current_lighter_side} {filled_size} @ {order_price}")
+                                    self.logger.info(f"🔔 waiting_for_lighter_fill set to: {self.waiting_for_lighter_fill}")
+                                    
                                     return  # 成功成交，退出函數
                                     
                                 elif order_status in ['CANCELED', 'REJECTED', 'EXPIRED']:
@@ -1169,9 +1175,11 @@ class HedgeBot:
                 break
 
             start_time = time.time()
+            self.logger.info(f"⏳ Waiting for GRVT order to fill and trigger Lighter hedge...")
             while not self.order_execution_complete and not self.stop_flag:
                 # Check if GRVT order filled and we need to place Lighter order
                 if self.waiting_for_lighter_fill:
+                    self.logger.info(f"🎯 GRVT order filled! Placing Lighter {self.current_lighter_side} order...")
                     await self.place_lighter_market_order(
                         self.current_lighter_side,
                         self.current_lighter_quantity,
@@ -1200,9 +1208,11 @@ class HedgeBot:
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
                 break
 
+            self.logger.info(f"⏳ Waiting for GRVT order to fill and trigger Lighter hedge...")
             while not self.order_execution_complete and not self.stop_flag:
                 # Check if GRVT order filled and we need to place Lighter order
                 if self.waiting_for_lighter_fill:
+                    self.logger.info(f"🎯 GRVT order filled! Placing Lighter {self.current_lighter_side} order...")
                     await self.place_lighter_market_order(
                         self.current_lighter_side,
                         self.current_lighter_quantity,
