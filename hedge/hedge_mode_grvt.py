@@ -1133,9 +1133,40 @@ class HedgeBot:
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
                 break
 
+            # 使用實際持倉檢查來觸發對沖，而不是依賴 WebSocket
             start_time = time.time()
+            last_grvt_position = await self.get_grvt_position()
+            last_lighter_position = await self.get_lighter_position()
+            
             while not self.order_execution_complete and not self.stop_flag:
-                # Check if GRVT order filled and we need to place Lighter order
+                # 定期檢查實際持倉變化
+                current_grvt_position = await self.get_grvt_position()
+                current_lighter_position = await self.get_lighter_position()
+                
+                # 檢查 GRVT 持倉是否有變化（表示有新成交）
+                if current_grvt_position != last_grvt_position:
+                    self.logger.info(f"🔄 GRVT position changed: {last_grvt_position} → {current_grvt_position}")
+                    
+                    # 計算需要對沖的數量
+                    position_change = current_grvt_position - last_grvt_position
+                    if abs(position_change) > Decimal('0.001'):  # 有顯著變化
+                        # 觸發對沖
+                        lighter_side = 'sell' if position_change > 0 else 'buy'
+                        hedge_quantity = abs(position_change)
+                        
+                        self.logger.info(f"🚀 Position-based hedge trigger: {hedge_quantity} {lighter_side}")
+                        
+                        # 立即執行對沖
+                        await self.place_lighter_market_order(
+                            lighter_side,
+                            hedge_quantity,
+                            Decimal('0')
+                        )
+                        break
+                    
+                    last_grvt_position = current_grvt_position
+                
+                # 檢查是否已經有對沖觸發
                 if self.waiting_for_lighter_fill:
                     await self.place_lighter_market_order(
                         self.current_lighter_side,
@@ -1144,7 +1175,7 @@ class HedgeBot:
                     )
                     break
 
-                await asyncio.sleep(0.001)  # 提高檢查頻率到 1ms
+                await asyncio.sleep(0.1)  # 每 100ms 檢查一次持倉
                 if time.time() - start_time > 180:
                     self.logger.error("❌ Timeout waiting for trade completion")
                     break
