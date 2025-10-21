@@ -767,12 +767,8 @@ class HedgeBot:
         else:
             lighter_side = 'buy'
 
-        # 計算需要對沖的數量 - 使用當前 GRVT 持倉而不是單次成交
-        hedge_quantity = abs(self.grvt_position)
-        
-        # 如果 GRVT 持倉為 0，使用成交數量
-        if hedge_quantity == 0:
-            hedge_quantity = filled_size
+        # 計算需要對沖的數量 - 使用單次成交數量，不是累積持倉
+        hedge_quantity = filled_size
 
         # Store order details for immediate execution
         self.current_lighter_side = lighter_side
@@ -887,30 +883,19 @@ class HedgeBot:
                 if position_diff > Decimal('0.001'):
                     self.logger.warning(f"⚠️ Position mismatch detected: GRVT={grvt_pos}, Lighter={lighter_pos}, diff={position_diff}")
                     
-                    # 如果 GRVT 有持倉但 Lighter 沒有對應對沖，立即市價對沖
-                    if grvt_pos != Decimal('0') and not self.waiting_for_lighter_fill:
-                        self.logger.warning(f"🚨 Emergency hedge: GRVT={grvt_pos}, immediately hedging with market order")
+                    # 緊急對沖：只對沖不匹配的部分，避免重複對沖
+                    if position_diff > Decimal('0.001') and not self.waiting_for_lighter_fill:
+                        # 計算需要對沖的數量（不匹配的部分）
+                        if abs(grvt_pos) > abs(lighter_pos):
+                            # GRVT 持倉更大，需要在 Lighter 增加對沖
+                            lighter_side = 'sell' if grvt_pos > 0 else 'buy'
+                            hedge_quantity = abs(grvt_pos) - abs(lighter_pos)
+                        else:
+                            # Lighter 持倉更大，需要在 Lighter 減少持倉
+                            lighter_side = 'buy' if lighter_pos > 0 else 'sell'
+                            hedge_quantity = abs(lighter_pos) - abs(grvt_pos)
                         
-                        # 立即觸發市價對沖
-                        lighter_side = 'sell' if grvt_pos > 0 else 'buy'
-                        hedge_quantity = abs(grvt_pos)
-                        
-                        # 設置對沖參數
-                        self.current_lighter_side = lighter_side
-                        self.current_lighter_quantity = hedge_quantity
-                        self.current_lighter_price = Decimal('0')  # 市價單
-                        self.waiting_for_lighter_fill = True
-                        
-                        # 立即執行市價對沖
-                        await self.place_lighter_market_order(lighter_side, hedge_quantity, Decimal('0'))
-                    
-                    # 如果 Lighter 有持倉但 GRVT 沒有，立即市價對沖 Lighter
-                    elif lighter_pos != Decimal('0') and not self.waiting_for_lighter_fill:
-                        self.logger.warning(f"🚨 Emergency hedge: Lighter={lighter_pos}, immediately hedging with market order")
-                        
-                        # 立即觸發市價對沖 Lighter
-                        lighter_side = 'sell' if lighter_pos > 0 else 'buy'
-                        hedge_quantity = abs(lighter_pos)
+                        self.logger.warning(f"🚨 Emergency hedge: Correcting mismatch with {hedge_quantity} {lighter_side}")
                         
                         # 設置對沖參數
                         self.current_lighter_side = lighter_side
