@@ -800,7 +800,7 @@ class HedgeBot:
         try:
             client_order_index = int(time.time() * 1000)
             
-            # 使用市價單類型
+            # 使用市價單類型 - 修復過期時間問題
             tx_info, error = self.lighter_client.sign_create_order(
                 market_index=self.lighter_market_index,
                 client_order_index=client_order_index,
@@ -808,7 +808,7 @@ class HedgeBot:
                 price=int(price * self.price_multiplier),
                 is_ask=is_ask,
                 order_type=self.lighter_client.ORDER_TYPE_MARKET,  # 使用市價單
-                time_in_force=self.lighter_client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,  # IOC 確保立即成交
+                time_in_force=self.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,  # 使用 GTT 而不是 IOC
                 reduce_only=False,
                 trigger_price=0,
             )
