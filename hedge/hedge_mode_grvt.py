@@ -50,6 +50,12 @@ class HedgeBot:
         
         # 持倉監控任務
         self.position_monitor_task = None
+        
+        # API 速率限制管理
+        self.last_grvt_position_call = 0
+        self.last_lighter_position_call = 0
+        self.grvt_rate_limit = 1.5  # 1.5 秒間隔，符合等級 3-4 限制（75-100 次/10秒）
+        self.lighter_rate_limit = 1.0  # 1 秒間隔，避免 Lighter 限制
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -796,13 +802,20 @@ class HedgeBot:
         self.logger.info(f"🔄 Hedge calculation: GRVT position={self.grvt_position}, hedge_quantity={hedge_quantity}")
 
     async def get_grvt_position(self):
-        """獲取 GRVT 實際持倉"""
+        """獲取 GRVT 實際持倉 - 帶速率限制"""
         try:
             if not self.grvt_client:
                 return Decimal('0')
             
+            # 檢查速率限制
+            current_time = time.time()
+            if current_time - self.last_grvt_position_call < self.grvt_rate_limit:
+                self.logger.debug(f"GRVT API rate limit, skipping call (last: {current_time - self.last_grvt_position_call:.1f}s ago)")
+                return Decimal('0')
+            
             # 使用 GRVT SDK 的 fetch_positions 方法獲取實際持倉
             positions = self.grvt_client.rest_client.fetch_positions(symbols=[self.grvt_contract_id])
+            self.last_grvt_position_call = current_time
             
             if positions:
                 for position in positions:
@@ -823,9 +836,15 @@ class HedgeBot:
             return Decimal('0')
 
     async def get_lighter_position(self):
-        """獲取 Lighter 實際持倉"""
+        """獲取 Lighter 實際持倉 - 帶速率限制"""
         try:
             if not self.lighter_client:
+                return Decimal('0')
+            
+            # 檢查速率限制
+            current_time = time.time()
+            if current_time - self.last_lighter_position_call < self.lighter_rate_limit:
+                self.logger.debug(f"Lighter API rate limit, skipping call (last: {current_time - self.last_lighter_position_call:.1f}s ago)")
                 return Decimal('0')
             
             # 使用 Lighter API 獲取持倉信息
@@ -834,6 +853,7 @@ class HedgeBot:
             
             # 獲取賬戶信息
             account_data = await account_api.account(by="index", value=str(self.lighter_client.account_index))
+            self.last_lighter_position_call = current_time
             
             if account_data and account_data.accounts:
                 positions = account_data.accounts[0].positions
@@ -869,8 +889,8 @@ class HedgeBot:
                 else:
                     self.logger.debug(f"✅ Positions match: GRVT={grvt_pos}, Lighter={lighter_pos}")
                 
-                # 等待 1 秒
-                await asyncio.sleep(1.0)
+                # 等待 2 秒，符合 GRVT API 速率限制（等級 3-4：75-100 次/10秒）
+                await asyncio.sleep(2.0)
                 
             except Exception as e:
                 self.logger.error(f"❌ Error in position monitor: {e}")
