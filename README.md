@@ -388,7 +388,7 @@ python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 20
 - `APEX_OMNI_KEY_SEED`: 您的 Apex Omni 密钥种子
 
 #### GRVT 配置
-
+python3 hedge_mode.py --exchange grvt --ticker SOL --size 0.1 --iter 20
 - `GRVT_TRADING_ACCOUNT_ID`: 您的 GRVT 交易账户 ID
 - `GRVT_PRIVATE_KEY`: 您的 GRVT 私钥
 - `GRVT_API_KEY`: 您的 GRVT API 密钥
@@ -465,5 +465,6 @@ python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 20
 ## 免责声明
 
 本软件仅供教育和研究目的。加密货币交易涉及重大风险，可能导致重大财务损失。使用风险自负，切勿用您无法承受损失的资金进行交易。
-#   s s s s  
+#   s s s s 
+ 
  

@@ -42,6 +42,11 @@ class HedgeBot:
         self.grvt_position = Decimal('0')
         self.lighter_position = Decimal('0')
         self.current_order = {}
+        
+        # 對沖寬限期機制 (1秒)
+        self.hedge_grace_period = 1.0  # 秒
+        self.hedge_grace_until = None  # 寬限期截止時間
+        self.hedge_in_progress = False  # 是否正在進行對沖
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -63,6 +68,9 @@ class HedgeBot:
         logging.getLogger('urllib3').setLevel(logging.WARNING)
         logging.getLogger('requests').setLevel(logging.WARNING)
         logging.getLogger('websockets').setLevel(logging.WARNING)
+        # Disable verbose pysdk logging
+        logging.getLogger('pysdk').setLevel(logging.WARNING)
+        logging.getLogger('pysdk.grvt_ccxt_logging_selector').setLevel(logging.WARNING)
 
         # Create file handler with UTF-8 encoding
         file_handler = logging.FileHandler(self.log_filename, encoding='utf-8')
@@ -125,6 +133,9 @@ class HedgeBot:
         # Strategy state
         self.waiting_for_lighter_fill = False
         self.wait_start_time = None
+        self.hedge_grace_period = 1.0  # 對沖寬限期
+        self.hedge_grace_until = 0
+        self.hedge_in_progress = False
 
         # Order execution tracking
         self.order_execution_complete = False
@@ -164,6 +175,36 @@ class HedgeBot:
         if self.lighter_ws_task and not self.lighter_ws_task.done():
             try:
                 self.lighter_ws_task.cancel()
+                self.logger.info("🔌 Lighter WebSocket task cancelled")
+            except Exception as e:
+                self.logger.error(f"Error cancelling Lighter WebSocket task: {e}")
+
+        # Close logging handlers properly
+        for handler in self.logger.handlers[:]:
+            try:
+                handler.close()
+                self.logger.removeHandler(handler)
+            except Exception:
+                pass
+
+    async def async_shutdown(self):
+        """Async shutdown handler for proper resource cleanup."""
+        self.stop_flag = True
+        self.logger.info("\n🛑 Stopping...")
+
+        # Close GRVT WebSocket
+        if self.grvt_client and hasattr(self.grvt_client, 'disconnect'):
+            try:
+                await self.grvt_client.disconnect()
+                self.logger.info("🔌 GRVT WebSocket disconnected")
+            except Exception as e:
+                self.logger.error(f"Error disconnecting GRVT WebSocket: {e}")
+
+        # Cancel Lighter WebSocket task
+        if self.lighter_ws_task and not self.lighter_ws_task.done():
+            try:
+                self.lighter_ws_task.cancel()
+                await asyncio.gather(self.lighter_ws_task, return_exceptions=True)
                 self.logger.info("🔌 Lighter WebSocket task cancelled")
             except Exception as e:
                 self.logger.error(f"Error cancelling Lighter WebSocket task: {e}")
@@ -631,46 +672,77 @@ class HedgeBot:
             raise Exception(f"Failed to place order: {order_result.error_message}")
 
     async def place_grvt_post_only_order(self, side: str, quantity: Decimal):
-        """Place a post-only order on GRVT."""
+        """Place a post-only order on GRVT with improved fill strategy."""
         if not self.grvt_client:
             raise Exception("GRVT client not initialized")
 
         self.grvt_order_status = None
         self.logger.info(f"[OPEN] [GRVT] [{side}] Placing GRVT POST-ONLY order")
-        order_id = await self.place_bbo_order(side, quantity)
-
-        start_time = time.time()
-        while not self.stop_flag:
-            if self.grvt_order_status == 'CANCELED':
-                self.grvt_order_status = None
+        
+        # 重試機制：最多重試 3 次，每次調整價格
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries and not self.stop_flag:
+            try:
                 order_id = await self.place_bbo_order(side, quantity)
                 start_time = time.time()
-                await asyncio.sleep(0.5)
-            elif self.grvt_order_status in ['NEW', 'OPEN', 'PENDING', 'CANCELING', 'PARTIALLY_FILLED']:
-                await asyncio.sleep(0.5)
-                if time.time() - start_time > 10:
-                    try:
-                        # Cancel the order using GRVT client
-                        cancel_result = await self.grvt_client.cancel_order(order_id)
-                        if cancel_result.success:
-                            self.grvt_order_status = 'CANCELED'
+                
+                # 等待成交，縮短超時時間
+                timeout_duration = 8 if retry_count == 0 else 5  # 第一次給更多時間
+                
+                while not self.stop_flag:
+                    if self.grvt_order_status == 'CANCELED':
+                        self.grvt_order_status = None
+                        break  # 跳出內層循環，重新下單
+                    elif self.grvt_order_status in ['NEW', 'OPEN', 'PENDING', 'CANCELING', 'PARTIALLY_FILLED']:
+                        await asyncio.sleep(0.3)  # 縮短檢查間隔
+                        if time.time() - start_time > timeout_duration:
+                            try:
+                                # 取消訂單
+                                cancel_result = await self.grvt_client.cancel_order(order_id)
+                                if cancel_result.success:
+                                    self.grvt_order_status = 'CANCELED'
+                                    self.logger.warning(f"⚠️ Order timeout after {timeout_duration}s, retrying...")
+                                else:
+                                    self.logger.error(f"❌ Error canceling GRVT order: {cancel_result.error_message}")
+                            except Exception as e:
+                                self.logger.error(f"❌ Error canceling GRVT order: {e}")
+                            break
+                    elif self.grvt_order_status == 'FILLED':
+                        self.logger.info(f"✅ Order filled successfully on attempt {retry_count + 1}")
+                        return  # 成功成交，退出函數
+                    else:
+                        if self.grvt_order_status is not None:
+                            self.logger.error(f"❌ Unknown GRVT order status: {self.grvt_order_status}")
+                            break
                         else:
-                            self.logger.error(f"❌ Error canceling GRVT order: {cancel_result.error_message}")
-                    except Exception as e:
-                        self.logger.error(f"❌ Error canceling GRVT order: {e}")
-            elif self.grvt_order_status == 'FILLED':
-                break
-            else:
-                if self.grvt_order_status is not None:
-                    self.logger.error(f"❌ Unknown GRVT order status: {self.grvt_order_status}")
-                    break
-                else:
-                    # Wait for order status update
-                    await asyncio.sleep(0.5)
-                    # Check for timeout if no status update
-                    if time.time() - start_time > 15:
-                        self.logger.error("❌ Timeout waiting for order status update")
+                            # Wait for order status update
+                            await asyncio.sleep(0.3)
+                            # Check for timeout if no status update
+                            if time.time() - start_time > timeout_duration + 5:
+                                self.logger.error("❌ Timeout waiting for order status update")
+                                break
+                
+                # 如果沒有成交，增加重試計數
+                if self.grvt_order_status != 'FILLED':
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        self.logger.warning(f"⚠️ Order not filled, retrying ({retry_count}/{max_retries})...")
+                        await asyncio.sleep(1)  # 短暫等待後重試
+                    else:
+                        self.logger.error(f"❌ Failed to fill order after {max_retries} attempts")
                         break
+                else:
+                    break  # 成功成交，退出重試循環
+                    
+            except Exception as e:
+                retry_count += 1
+                self.logger.error(f"❌ Error placing order (attempt {retry_count}): {e}")
+                if retry_count < max_retries:
+                    await asyncio.sleep(1)
+                else:
+                    break
 
     def handle_grvt_order_update(self, order_data):
         """Handle GRVT order updates from WebSocket."""
@@ -694,23 +766,30 @@ class HedgeBot:
             'price': price
         }
 
+        # 設置對沖寬限期 (1秒)
+        import time
+        self.hedge_grace_until = time.time() + self.hedge_grace_period
+        self.hedge_in_progress = True
         self.waiting_for_lighter_fill = True
 
     async def place_lighter_market_order(self, lighter_side: str, quantity: Decimal, price: Decimal):
+        """真正的市價單對沖 - 使用市價單而不是限價單"""
         if not self.lighter_client:
             await self.initialize_lighter_client()
 
         best_bid, best_ask = self.get_lighter_best_levels()
 
-        # Determine order parameters
+        # 市價單策略：使用更激進的價格確保立即成交
         if lighter_side.lower() == 'buy':
             order_type = "CLOSE"
             is_ask = False
-            price = best_ask[0] * Decimal('1.002')
+            # 市價買入：使用更高的價格確保立即成交
+            price = best_ask[0] * Decimal('1.02')  # 比最佳賣價高 2%
         else:
             order_type = "OPEN"
             is_ask = True
-            price = best_bid[0] * Decimal('0.998')
+            # 市價賣出：使用更低的價格確保立即成交
+            price = best_bid[0] * Decimal('0.98')  # 比最佳買價低 2%
 
         # Reset order state
         self.lighter_order_filled = False
@@ -720,15 +799,16 @@ class HedgeBot:
 
         try:
             client_order_index = int(time.time() * 1000)
-            # Sign the order transaction
+            
+            # 使用市價單類型
             tx_info, error = self.lighter_client.sign_create_order(
                 market_index=self.lighter_market_index,
                 client_order_index=client_order_index,
                 base_amount=int(quantity * self.base_amount_multiplier),
                 price=int(price * self.price_multiplier),
                 is_ask=is_ask,
-                order_type=self.lighter_client.ORDER_TYPE_LIMIT,
-                time_in_force=self.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+                order_type=self.lighter_client.ORDER_TYPE_MARKET,  # 使用市價單
+                time_in_force=self.lighter_client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,  # IOC 確保立即成交
                 reduce_only=False,
                 trigger_price=0,
             )
@@ -741,31 +821,70 @@ class HedgeBot:
                 tx_info=tx_info
             )
 
-            self.logger.info(f"[{client_order_index}] [{order_type}] [Lighter] [OPEN]: {quantity}")
+            self.logger.info(f"[{client_order_index}] [{order_type}] [Lighter] [MARKET]: {quantity} @ {price}")
 
-            await self.monitor_lighter_order(client_order_index)
+            # 市價單通常立即成交，縮短監控時間
+            await self.monitor_lighter_market_order(client_order_index)
 
             return tx_hash
         except Exception as e:
-            self.logger.error(f"❌ Error placing Lighter order: {e}")
+            self.logger.error(f"❌ Error placing Lighter market order: {e}")
             return None
 
-    async def monitor_lighter_order(self, client_order_index: int):
-        """Monitor Lighter order and adjust price if needed."""
-
+    async def monitor_lighter_market_order(self, client_order_index: int):
+        """監控市價單 - 市價單通常立即成交，使用更短的超時時間"""
         start_time = time.time()
+        max_wait_time = 5  # 市價單最多等待 5 秒
+        
         while not self.lighter_order_filled and not self.stop_flag:
-            # Check for timeout (30 seconds total)
-            if time.time() - start_time > 30:
-                self.logger.error(f"❌ Timeout waiting for Lighter order fill after {time.time() - start_time:.1f}s")
-                self.logger.error(f"❌ Order state - Filled: {self.lighter_order_filled}")
-
-                # Fallback: Mark as filled to continue trading
-                self.logger.warning("⚠️ Using fallback - marking order as filled to continue trading")
+            elapsed_time = time.time() - start_time
+            
+            if elapsed_time > max_wait_time:
+                self.logger.error(f"❌ Market order timeout after {elapsed_time:.1f}s")
+                # 市價單超時，直接標記為成交以避免阻塞
                 self.lighter_order_filled = True
                 self.waiting_for_lighter_fill = False
                 self.order_execution_complete = True
                 break
+
+            await asyncio.sleep(0.05)  # 市價單檢查頻率更高
+
+    async def monitor_lighter_order(self, client_order_index: int):
+        """Monitor Lighter order with improved timeout and retry logic."""
+
+        start_time = time.time()
+        price_adjustment_count = 0
+        max_price_adjustments = 2
+        
+        while not self.lighter_order_filled and not self.stop_flag:
+            elapsed_time = time.time() - start_time
+            
+            # 縮短超時時間，增加價格調整
+            if elapsed_time > 15:  # 從 30 秒縮短到 15 秒
+                if price_adjustment_count < max_price_adjustments:
+                    # 嘗試調整價格
+                    try:
+                        best_bid, best_ask = self.get_lighter_best_levels()
+                        if self.lighter_order_side.lower() == 'buy':
+                            new_price = best_ask[0] * Decimal('1.008')  # 更積極的價格
+                        else:
+                            new_price = best_bid[0] * Decimal('0.992')  # 更積極的價格
+                        
+                        await self.modify_lighter_order(client_order_index, new_price)
+                        price_adjustment_count += 1
+                        start_time = time.time()  # 重置計時器
+                        self.logger.warning(f"⚠️ Price adjustment {price_adjustment_count}/{max_price_adjustments}: {new_price}")
+                    except Exception as e:
+                        self.logger.error(f"❌ Error adjusting price: {e}")
+                        break
+                else:
+                    # 最終超時，使用 fallback
+                    self.logger.error(f"❌ Timeout waiting for Lighter order fill after {elapsed_time:.1f}s")
+                    self.logger.warning("⚠️ Using fallback - marking order as filled to continue trading")
+                    self.lighter_order_filled = True
+                    self.waiting_for_lighter_fill = False
+                    self.order_execution_complete = True
+                    break
 
             await asyncio.sleep(0.1)  # Check every 100ms
 
@@ -1048,7 +1167,7 @@ class HedgeBot:
             self.logger.info("\n🛑 Received interrupt signal...")
         finally:
             self.logger.info("🔄 Cleaning up...")
-            self.shutdown()
+            await self.async_shutdown()
 
 
 def parse_arguments():
