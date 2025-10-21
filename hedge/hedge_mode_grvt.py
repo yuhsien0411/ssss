@@ -175,15 +175,6 @@ class HedgeBot:
         self.stop_flag = True
         self.logger.info("\n🛑 Stopping...")
 
-        # Close WebSocket connections
-        if self.grvt_client:
-            try:
-                # Note: disconnect() is async, but shutdown() is sync
-                # We'll let the cleanup happen naturally
-                self.logger.info("🔌 GRVT WebSocket will be disconnected")
-            except Exception as e:
-                self.logger.error(f"Error disconnecting GRVT WebSocket: {e}")
-
         # Cancel Lighter WebSocket task
         if self.lighter_ws_task and not self.lighter_ws_task.done():
             try:
@@ -199,6 +190,27 @@ class HedgeBot:
                 self.logger.removeHandler(handler)
             except Exception:
                 pass
+
+    async def async_shutdown(self):
+        """Async shutdown handler for proper resource cleanup."""
+        try:
+            # No GRVT WebSocket to disconnect (using REST API only)
+            self.logger.info("✅ GRVT REST API only mode - no WebSocket to disconnect")
+
+            # Cancel Lighter WebSocket task if still running
+            if self.lighter_ws_task and not self.lighter_ws_task.done():
+                try:
+                    self.lighter_ws_task.cancel()
+                    try:
+                        await self.lighter_ws_task
+                    except asyncio.CancelledError:
+                        pass
+                    self.logger.info("✅ Lighter WebSocket task cancelled")
+                except Exception as e:
+                    self.logger.error(f"❌ Error cancelling Lighter WebSocket task: {e}")
+
+        except Exception as e:
+            self.logger.error(f"❌ Error during async shutdown: {e}")
 
     def _initialize_csv_file(self):
         """Initialize CSV file with headers if it doesn't exist."""
@@ -1103,14 +1115,8 @@ class HedgeBot:
             self.logger.error(f"❌ Failed to initialize: {e}")
             return
 
-        # Setup GRVT websocket
-        try:
-            await self.setup_grvt_websocket()
-            self.logger.info("✅ GRVT WebSocket connection established")
-
-        except Exception as e:
-            self.logger.error(f"❌ Failed to setup GRVT websocket: {e}")
-            return
+        # Skip GRVT WebSocket setup - use REST API only for order status
+        self.logger.info("✅ Using REST API only for GRVT order status (skipping WebSocket)")
 
         # Setup Lighter websocket
         try:
@@ -1265,7 +1271,10 @@ class HedgeBot:
             self.logger.info("\n🛑 Received interrupt signal...")
         finally:
             self.logger.info("🔄 Cleaning up...")
+            # First call sync shutdown to set stop flag and basic cleanup
             self.shutdown()
+            # Then call async shutdown for proper WebSocket cleanup
+            await self.async_shutdown()
 
 
 def parse_arguments():
