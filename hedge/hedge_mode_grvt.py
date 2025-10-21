@@ -755,14 +755,21 @@ class HedgeBot:
         else:
             lighter_side = 'buy'
 
+        # 計算需要對沖的數量 - 使用當前 GRVT 持倉而不是單次成交
+        hedge_quantity = abs(self.grvt_position)
+        
+        # 如果 GRVT 持倉為 0，使用成交數量
+        if hedge_quantity == 0:
+            hedge_quantity = filled_size
+
         # Store order details for immediate execution
         self.current_lighter_side = lighter_side
-        self.current_lighter_quantity = filled_size
+        self.current_lighter_quantity = hedge_quantity  # 使用計算出的對沖數量
         self.current_lighter_price = price
 
         self.lighter_order_info = {
             'lighter_side': lighter_side,
-            'quantity': filled_size,
+            'quantity': hedge_quantity,
             'price': price
         }
 
@@ -771,6 +778,8 @@ class HedgeBot:
         self.hedge_grace_until = time.time() + self.hedge_grace_period
         self.hedge_in_progress = True
         self.waiting_for_lighter_fill = True
+        
+        self.logger.info(f"🔄 Hedge calculation: GRVT position={self.grvt_position}, hedge_quantity={hedge_quantity}")
 
     async def place_lighter_market_order(self, lighter_side: str, quantity: Decimal, price: Decimal):
         """真正的市價單對沖 - 使用市價單而不是限價單"""
