@@ -61,7 +61,8 @@ class HedgeBot:
         if self.lighter_account_type == 'premium':
             self.lighter_rate_limit = 0.1  # 0.1 秒間隔，符合進階帳戶限制（24000 次/分鐘）
         else:
-            self.lighter_rate_limit = 2.0  # 2 秒間隔，符合標準帳戶限制（60 次/分鐘）
+            # 標準帳戶：考慮 200ms 製造/取消延遲 + 300ms 受贈者延遲
+            self.lighter_rate_limit = 1.0  # 1 秒間隔，符合標準帳戶延遲特性（60 次/分鐘）
 
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -1193,7 +1194,10 @@ class HedgeBot:
         # 顯示速率限制設置
         self.logger.info(f"📊 API Rate Limits:")
         self.logger.info(f"   GRVT: {self.grvt_rate_limit}s interval (Level 3-4: 75-100 calls/10s)")
-        self.logger.info(f"   Lighter: {self.lighter_rate_limit}s interval ({self.lighter_account_type} account: {60 if self.lighter_account_type == 'standard' else 24000} calls/min)")
+        if self.lighter_account_type == 'premium':
+            self.logger.info(f"   Lighter: {self.lighter_rate_limit}s interval (premium account: 24000 calls/min, 0ms delay)")
+        else:
+            self.logger.info(f"   Lighter: {self.lighter_rate_limit}s interval (standard account: 60 calls/min, 200ms make/cancel + 300ms taker delay)")
 
         await asyncio.sleep(5)
 
