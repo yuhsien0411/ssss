@@ -67,25 +67,6 @@ class LighterClient(BaseExchangeClient):
         if missing_vars:
             raise ValueError(f"Missing required environment variables: {missing_vars}")
 
-    async def get_account_index(self, l1_address: str) -> int:
-        """Get account index for a given L1 address using official SDK."""
-        try:
-            # Use shared API client
-            account_api = lighter.AccountApi(self.api_client)
-            
-            # Get account data by L1 address
-            account_data = await account_api.account(by="l1_address", value=l1_address)
-            
-            if account_data and hasattr(account_data, 'account_index'):
-                self.logger.log(f"Found account index: {account_data.account_index} for address: {l1_address}", "INFO")
-                return account_data.account_index
-            else:
-                raise Exception(f"No account found for address: {l1_address}")
-
-        except Exception as e:
-            self.logger.log(f"Error getting account index: {e}", "ERROR")
-            raise
-
     async def _get_market_config(self, ticker: str) -> Tuple[int, int, int]:
         """Get market configuration for a ticker using official SDK."""
         try:
@@ -121,11 +102,15 @@ class LighterClient(BaseExchangeClient):
         """Initialize the Lighter client using official SDK."""
         if self.lighter_client is None:
             try:
+                # Import nonce manager to use API-based nonce management for reliability
+                from lighter.nonce_manager import NonceManagerType
+                
                 self.lighter_client = SignerClient(
                     url=self.base_url,
                     private_key=self.api_key_private_key,
                     account_index=self.account_index,
                     api_key_index=self.api_key_index,
+                    nonce_management_type=NonceManagerType.API  # Use API-based nonce to avoid sync issues
                 )
 
                 # Check client
@@ -133,7 +118,7 @@ class LighterClient(BaseExchangeClient):
                 if err is not None:
                     raise Exception(f"CheckClient error: {err}")
 
-                self.logger.log("Lighter client initialized successfully", "INFO")
+                self.logger.log("Lighter client initialized successfully with API nonce management", "INFO")
             except Exception as e:
                 self.logger.log(f"Failed to initialize Lighter client: {e}", "ERROR")
                 raise
@@ -177,10 +162,20 @@ class LighterClient(BaseExchangeClient):
             if hasattr(self, 'ws_manager') and self.ws_manager:
                 await self.ws_manager.disconnect()
 
+            # Close Lighter client (which has its own API client)
+            if hasattr(self, 'lighter_client') and self.lighter_client:
+                try:
+                    await self.lighter_client.close()
+                    self.lighter_client = None
+                except Exception as e:
+                    self.logger.log(f"Error closing Lighter client: {e}", "WARNING")
+
             # Close shared API client
             if self.api_client:
                 await self.api_client.close()
                 self.api_client = None
+                
+            self.logger.log("Lighter client disconnected successfully", "INFO")
         except Exception as e:
             self.logger.log(f"Error during Lighter disconnect: {e}", "ERROR")
 
@@ -268,23 +263,46 @@ class LighterClient(BaseExchangeClient):
 
         return best_bid, best_ask
 
-    async def _submit_order_with_retry(self, order_params: Dict[str, Any]) -> OrderResult:
-        """Submit an order with Lighter using official SDK."""
+    async def _submit_order_with_retry(self, order_params: Dict[str, Any], max_retries: int = 3) -> OrderResult:
+        """Submit an order with Lighter using official SDK with retry on nonce errors."""
         # Ensure client is initialized
         if self.lighter_client is None:
-            # This is a sync method, so we need to handle this differently
-            # For now, raise an error if client is not initialized
             raise ValueError("Lighter client not initialized. Call connect() first.")
 
-        # Create order using official SDK
-        create_order, tx_hash, error = await self.lighter_client.create_order(**order_params)
-        if error is not None:
-            return OrderResult(
-                success=False, order_id=str(order_params['client_order_index']),
-                error_message=f"Order creation error: {error}")
-
-        else:
-            return OrderResult(success=True, order_id=str(order_params['client_order_index']))
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                # Create order using official SDK
+                create_order, tx_hash, error = await self.lighter_client.create_order(**order_params)
+                
+                if error is not None:
+                    # Check if it's a nonce error
+                    if 'invalid nonce' in str(error).lower():
+                        self.logger.log(f"Nonce error on attempt {attempt + 1}/{max_retries}, refreshing nonce...", "WARNING")
+                        # Nonce manager should have already refreshed, wait a bit before retry
+                        await asyncio.sleep(0.5)
+                        last_error = error
+                        continue
+                    else:
+                        # Non-nonce error, don't retry
+                        return OrderResult(
+                            success=False, 
+                            order_id=str(order_params['client_order_index']),
+                            error_message=f"Order creation error: {error}")
+                else:
+                    # Success
+                    return OrderResult(success=True, order_id=str(order_params['client_order_index']))
+                    
+            except Exception as e:
+                self.logger.log(f"Exception on attempt {attempt + 1}/{max_retries}: {e}", "WARNING")
+                last_error = str(e)
+                await asyncio.sleep(0.5)
+        
+        # All retries exhausted
+        return OrderResult(
+            success=False, 
+            order_id=str(order_params['client_order_index']),
+            error_message=f"Order creation failed after {max_retries} attempts: {last_error}")
 
     async def place_limit_order(self, contract_id: str, quantity: Decimal, price: Decimal,
                                 side: str) -> OrderResult:
@@ -341,6 +359,18 @@ class LighterClient(BaseExchangeClient):
             await asyncio.sleep(0.1)
             if self.current_order is not None:
                 order_status = self.current_order.status
+
+        # Check if we received order update from WebSocket
+        if self.current_order is None:
+            self.logger.log("[OPEN] Order not updated by WebSocket, using placed order result", "WARNING")
+            return OrderResult(
+                success=True,
+                order_id=order_result.order_id,
+                side=direction,
+                size=quantity,
+                price=order_price,
+                status='OPEN'
+            )
 
         return OrderResult(
             success=True,
@@ -400,25 +430,44 @@ class LighterClient(BaseExchangeClient):
 
         return order_price
 
-    async def cancel_order(self, order_id: str) -> OrderResult:
-        """Cancel an order with Lighter."""
+    async def cancel_order(self, order_id: str, max_retries: int = 3) -> OrderResult:
+        """Cancel an order with Lighter with retry on nonce errors."""
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
 
-        # Cancel order using official SDK
-        cancel_order, tx_hash, error = await self.lighter_client.cancel_order(
-            market_index=self.config.contract_id,
-            order_index=int(order_id)  # Assuming order_id is the order index
-        )
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                # Cancel order using official SDK
+                cancel_order, tx_hash, error = await self.lighter_client.cancel_order(
+                    market_index=self.config.contract_id,
+                    order_index=int(order_id)
+                )
 
-        if error is not None:
-            return OrderResult(success=False, error_message=f"Cancel order error: {error}")
+                if error is not None:
+                    # Check if it's a nonce error
+                    if 'invalid nonce' in str(error).lower():
+                        self.logger.log(f"Nonce error canceling order on attempt {attempt + 1}/{max_retries}, refreshing...", "WARNING")
+                        await asyncio.sleep(0.5)
+                        last_error = error
+                        continue
+                    else:
+                        # Non-nonce error, don't retry
+                        return OrderResult(success=False, error_message=f"Cancel order error: {error}")
 
-        if tx_hash:
-            return OrderResult(success=True)
-        else:
-            return OrderResult(success=False, error_message='Failed to send cancellation transaction')
+                if tx_hash:
+                    return OrderResult(success=True)
+                else:
+                    return OrderResult(success=False, error_message='Failed to send cancellation transaction')
+                    
+            except Exception as e:
+                self.logger.log(f"Exception canceling order on attempt {attempt + 1}/{max_retries}: {e}", "WARNING")
+                last_error = str(e)
+                await asyncio.sleep(0.5)
+        
+        # All retries exhausted
+        return OrderResult(success=False, error_message=f"Cancel failed after {max_retries} attempts: {last_error}")
 
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
         """Get order information from Lighter using official SDK."""
@@ -522,23 +571,15 @@ class LighterClient(BaseExchangeClient):
 
     async def get_account_positions(self) -> Decimal:
         """Get account positions using official SDK."""
-        try:
-            # Get account info which includes positions
-            positions = await self._fetch_positions_with_retry()
+        # Get account info which includes positions
+        positions = await self._fetch_positions_with_retry()
 
-            # Find position for current market
-            for position in positions:
-                if position.market_id == self.config.contract_id:
-                    position_size = Decimal(position.position)
-                    self.logger.log(f"Found Lighter position: {position_size} for market {self.config.contract_id}", "INFO")
-                    return position_size
+        # Find position for current market
+        for position in positions:
+            if position.market_id == self.config.contract_id:
+                return Decimal(position.position)
 
-            self.logger.log(f"No Lighter position found for market {self.config.contract_id}", "INFO")
-            return Decimal(0)
-            
-        except Exception as e:
-            self.logger.log(f"Error getting Lighter positions: {e}", "ERROR")
-            return Decimal(0)
+        return Decimal(0)
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID for a ticker."""
