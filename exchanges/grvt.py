@@ -119,7 +119,28 @@ class GrvtClient(BaseExchangeClient):
         """Disconnect from GRVT."""
         try:
             if self._ws_client:
-                await self._ws_client.__aexit__()
+                # Proper cleanup of WebSocket connection
+                try:
+                    # Cancel all pending tasks
+                    if hasattr(self._ws_client, '_tasks'):
+                        for task in self._ws_client._tasks:
+                            if not task.done():
+                                task.cancel()
+                    
+                    # Close the WebSocket connection gracefully
+                    if hasattr(self._ws_client, 'close'):
+                        await self._ws_client.close()
+                    elif hasattr(self._ws_client, '__aexit__'):
+                        await self._ws_client.__aexit__(None, None, None)
+                    
+                    # Give it a moment to clean up
+                    await asyncio.sleep(0.1)
+                    
+                except Exception as close_error:
+                    self.logger.log(f"Error during WebSocket close: {close_error}", "WARNING")
+                finally:
+                    self._ws_client = None
+                    
         except Exception as e:
             self.logger.log(f"Error during GRVT disconnect: {e}", "ERROR")
 
@@ -308,7 +329,7 @@ class GrvtClient(BaseExchangeClient):
                 active_orders = await self.get_active_orders(contract_id)
                 active_open_orders = 0
                 for order in active_orders:
-                    if order.side == direction:
+                    if order.side == self.config.direction:
                         active_open_orders += 1
                 if active_open_orders > 1:
                     self.logger.log(f"[OPEN] ERROR: Active open orders abnormal: {active_open_orders}", "ERROR")
@@ -316,31 +337,17 @@ class GrvtClient(BaseExchangeClient):
 
             # Get current market prices
             best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
-            
-            # 添加調試日誌
-            self.logger.log(f"[OPEN] Market prices - Best bid: {best_bid}, Best ask: {best_ask}", "INFO")
 
             if best_bid <= 0 or best_ask <= 0:
                 return OrderResult(success=False, error_message='Invalid bid/ask prices')
 
-            # Determine order side and price - 更接近市場價的策略
+            # Determine order side and price
             if direction == 'buy':
-                # 買單：使用 best_bid + 50% spread，更容易成交
-                spread = best_ask - best_bid
-                raw_price = best_bid + (spread * Decimal('0.5'))
+                order_price = best_ask - self.config.tick_size
             elif direction == 'sell':
-                # 賣單：使用 best_ask - 50% spread，更容易成交
-                spread = best_ask - best_bid
-                raw_price = best_ask - (spread * Decimal('0.5'))
+                order_price = best_bid + self.config.tick_size
             else:
                 raise Exception(f"[OPEN] Invalid direction: {direction}")
-            
-            # 對齊到 tick size - 修復 "Invalid limit price tick" 錯誤
-            tick_size = self.config.tick_size
-            order_price = (raw_price / tick_size).quantize(Decimal('1'), rounding='ROUND_HALF_UP') * tick_size
-            
-            # 添加訂單價格調試日誌
-            self.logger.log(f"[OPEN] Spread: {spread:.2f}, Raw price: {raw_price}, Tick-aligned price: {order_price}", "INFO")
 
             # Place the order using GRVT SDK
             try:

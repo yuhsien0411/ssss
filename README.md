@@ -315,6 +315,8 @@ python hedge_mode.py --exchange extended --ticker ETH --size 0.1 --iter 20
 python hedge_mode.py --exchange apex --ticker BTC --size 0.05 --iter 20
 
 # 运行 BTC 对冲模式（GRVT）
+python hedge_mode.py --exchange grvt --ticker ETH --size 0.0 --iter 20
+
 python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 20
 ```
 
@@ -387,13 +389,6 @@ python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 20
 - `APEX_API_KEY_SECRET`: 您的 Apex API 密钥私钥
 - `APEX_OMNI_KEY_SEED`: 您的 Apex Omni 密钥种子
 
-#### GRVT 配置
-python3 hedge_mode.py --exchange grvt --ticker SOL --size 0.1 --iter 20
-- `GRVT_TRADING_ACCOUNT_ID`: 您的 GRVT 交易账户 ID
-- `GRVT_PRIVATE_KEY`: 您的 GRVT 私钥
-- `GRVT_API_KEY`: 您的 GRVT API 密钥
-- `GRVT_ENVIRONMENT`: GRVT 环境（prod/testnet/staging/dev，默认：prod）
-
 **获取 LIGHTER_ACCOUNT_INDEX 的方法**：
 
 1. 在下面的网址最后加上你的钱包地址：
@@ -465,6 +460,3 @@ python3 hedge_mode.py --exchange grvt --ticker SOL --size 0.1 --iter 20
 ## 免责声明
 
 本软件仅供教育和研究目的。加密货币交易涉及重大风险，可能导致重大财务损失。使用风险自负，切勿用您无法承受损失的资金进行交易。
-#   s s s s 
- 
- 

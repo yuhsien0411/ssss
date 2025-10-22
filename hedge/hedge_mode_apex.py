@@ -62,17 +62,13 @@ class HedgeBot:
         logging.getLogger('requests').setLevel(logging.WARNING)
         logging.getLogger('websockets').setLevel(logging.WARNING)
 
-        # Create file handler with UTF-8 encoding
-        file_handler = logging.FileHandler(self.log_filename, encoding='utf-8')
+        # Create file handler
+        file_handler = logging.FileHandler(self.log_filename)
         file_handler.setLevel(logging.INFO)
 
-        # Create console handler with UTF-8 encoding
+        # Create console handler
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
-        
-        # Set UTF-8 encoding for stdout on Windows
-        if hasattr(sys.stdout, 'reconfigure'):
-            sys.stdout.reconfigure(encoding='utf-8')
 
         # Create different formatters for file and console
         file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
