@@ -523,6 +523,11 @@ class TradingBot:
 
                 # Filter close orders
                 self.active_close_orders = []
+                # Handle case when active_orders is None (API error)
+                if active_orders is None:
+                    self.logger.log("Failed to get active orders, using cached data", "WARNING")
+                    active_orders = []
+                
                 for order in active_orders:
                     if order.side == self.config.close_order_side:
                         self.active_close_orders.append({
