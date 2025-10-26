@@ -532,6 +532,11 @@ class LighterClient(BaseExchangeClient):
         """Get active orders for a contract using official SDK."""
         order_list = await self._fetch_orders_with_retry()
 
+        # Handle case when order_list is None (API error)
+        if order_list is None:
+            self.logger.log("Failed to get active orders, API returned None", "WARNING")
+            return []
+
         # Filter orders for the specific market
         contract_orders = []
         for order in order_list:
