@@ -67,6 +67,10 @@ class GrvtClient(BaseExchangeClient):
                 env=self.env,
                 parameters=parameters
             )
+            
+            # Load markets to ensure they are available for order creation
+            markets = self.rest_client.load_markets()
+            self.logger.log(f"Loaded {len(markets)} markets: {list(markets.keys())}", "INFO")
 
         except Exception as e:
             raise ValueError(f"Failed to initialize GRVT client: {e}")
@@ -273,38 +277,56 @@ class GrvtClient(BaseExchangeClient):
                                     side: str) -> OrderResult:
         """Place a post only order with GRVT using official SDK."""
 
-        # Place the order using GRVT SDK
-        order_result = self.rest_client.create_limit_order(
-            symbol=contract_id,
-            side=side,
-            amount=quantity,
-            price=price,
-            params={
-                'post_only': True,
-                'order_duration_secs': 30 * 86400 - 1, # GRVT SDK: signature expired cap is 30 days (default 1 day)
-            }
-        )
-        if not order_result:
-            raise Exception(f"[OPEN] Error placing order")
+        try:
+            # Create order using GRVT SDK's get_grvt_order function
+            from pysdk.grvt_ccxt_utils import get_grvt_order
+            
+            # Debug: Check if markets are loaded
+            self.logger.log(f"Available markets: {list(self.rest_client.markets.keys())}", "INFO")
+            self.logger.log(f"Contract ID: {contract_id}", "INFO")
+            
+            if contract_id not in self.rest_client.markets:
+                return OrderResult(success=False, error_message=f"Contract {contract_id} not found in markets")
+            
+            # Create the order object
+            order = get_grvt_order(
+                sub_account_id=self.trading_account_id,
+                symbol=contract_id,
+                order_type="limit",
+                side=side,
+                amount=quantity,
+                limit_price=price,
+                order_duration_secs=30 * 86400 - 1,  # 30 days - 1 second
+                params={
+                    'post_only': True,
+                    'client_order_id': int(time.time() * 1000) % (2**32)  # Generate unique client order ID
+                }
+            )
+            
+            # Use the existing _create_grvt_order method
+            self.logger.log(f"Creating order with parameters: {order}", "INFO")
+            result = self.rest_client._create_grvt_order(order)
+            self.logger.log(f"Order creation result: {result}", "INFO")
+            
+            if not result:
+                return OrderResult(success=False, error_message="Failed to create order")
 
-        client_order_id = order_result.get('metadata').get('client_order_id')
-        order_status = order_result.get('state').get('status')
-        order_status_start_time = time.time()
-        order_info = await self.get_order_info(client_order_id=client_order_id)
-        if order_info is not None:
-            order_status = order_info.status
+            client_order_id = result.get('metadata', {}).get('client_order_id')
+            order_status = result.get('state', {}).get('status')
 
-        while order_status in ['PENDING'] and time.time() - order_status_start_time < 10:
-            # Check order status after a short delay
-            await asyncio.sleep(0.05)
-            order_info = await self.get_order_info(client_order_id=client_order_id)
-            if order_info is not None:
-                order_status = order_info.status
-
-        if order_status == 'PENDING':
-            raise Exception('Paradex Server Error: Order not processed after 10 seconds')
-        else:
-            return order_info
+            # Return successful OrderResult
+            return OrderResult(
+                success=True,
+                order_id=client_order_id,
+                side=side,
+                size=quantity,
+                price=price,
+                status=order_status
+            )
+            
+        except Exception as e:
+            self.logger.log(f"Error placing post-only order: {e}", "ERROR")
+            return OrderResult(success=False, error_message=str(e))
 
     async def get_order_price(self, direction: str) -> Decimal:
         """Get the price of an order with GRVT using official SDK."""
@@ -530,6 +552,49 @@ class GrvtClient(BaseExchangeClient):
                 return abs(Decimal(position.get('size', 0)))
 
         return Decimal(0)
+
+    async def get_positions(self):
+        """Get all positions using GRVT SDK."""
+        try:
+            positions = self.rest_client.fetch_positions()
+            return positions
+        except Exception as e:
+            self.logger.log(f"Error getting positions: {e}", "ERROR")
+            return []
+
+    async def cancel_all_orders(self):
+        """Cancel all open orders using GRVT SDK's efficient cancel_all_orders method."""
+        try:
+            # Use GRVT SDK's cancel_all_orders method with contract-specific filters
+            ticker = self.config.ticker
+            if ticker:
+                # Extract base and quote from ticker (e.g., "ETH" from "ETH_USDT_Perp")
+                parts = ticker.split('_')
+                if len(parts) >= 2:
+                    base = parts[0]  # ETH
+                    quote = parts[1]  # USDT
+                    
+                    # Cancel orders for specific base/quote pair
+                    success = self.rest_client.cancel_all_orders(params={
+                        'kind': 'PERPETUAL',
+                        'base': base,
+                        'quote': quote
+                    })
+                else:
+                    # Fallback: cancel all orders
+                    success = self.rest_client.cancel_all_orders()
+            else:
+                # Fallback: cancel all orders
+                success = self.rest_client.cancel_all_orders()
+            
+            if success:
+                return {"success": True, "message": "All orders cancelled successfully"}
+            else:
+                return {"success": False, "error_message": "Failed to cancel orders"}
+                
+        except Exception as e:
+            self.logger.log(f"Error cancelling all orders: {e}", "ERROR")
+            return {"success": False, "error_message": str(e)}
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID and tick size for a ticker."""

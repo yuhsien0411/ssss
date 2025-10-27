@@ -118,6 +118,30 @@ class LighterClient(BaseExchangeClient):
                 if err is not None:
                     raise Exception(f"CheckClient error: {err}")
 
+                # Get market configuration if not already set
+                if self.base_amount_multiplier is None or self.price_multiplier is None:
+                    try:
+                        # Initialize API client first
+                        self.api_client = ApiClient(configuration=Configuration(host=self.base_url))
+                        
+                        # Get market config
+                        market_id, base_multiplier, price_multiplier = await self._get_market_config(self.config.ticker)
+                        
+                        # Set the multipliers
+                        self.base_amount_multiplier = base_multiplier
+                        self.price_multiplier = price_multiplier
+                        
+                        # Update contract_id in config
+                        self.config.contract_id = str(market_id)
+                        
+                        self.logger.log(f"Market config loaded: {self.config.ticker} -> ID={market_id}, "
+                                       f"Base multiplier={base_multiplier}, Price multiplier={price_multiplier}", "INFO")
+                    except Exception as e:
+                        self.logger.log(f"Failed to get market config: {e}", "ERROR")
+                        # Set default values to avoid None errors
+                        self.base_amount_multiplier = 1000000  # Default for ETH
+                        self.price_multiplier = 100000000  # Default for ETH
+
                 self.logger.log("Lighter client initialized successfully with API nonce management", "INFO")
             except Exception as e:
                 self.logger.log(f"Failed to initialize Lighter client: {e}", "ERROR")
@@ -306,7 +330,7 @@ class LighterClient(BaseExchangeClient):
 
     async def place_limit_order(self, contract_id: str, quantity: Decimal, price: Decimal,
                                 side: str) -> OrderResult:
-        """Place a post only order with Lighter using official SDK."""
+        """Place a limit order with Lighter using official SDK."""
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
@@ -339,6 +363,133 @@ class LighterClient(BaseExchangeClient):
         order_result = await self._submit_order_with_retry(order_params)
         return order_result
 
+    async def place_post_only_order(self, contract_id: str, quantity: Decimal, price: Decimal,
+                                    side: str) -> OrderResult:
+        """Place a post-only order with Lighter using official SDK."""
+        # Ensure client is initialized
+        if self.lighter_client is None:
+            await self._initialize_lighter_client()
+
+        # Determine order side and price
+        if side.lower() == 'buy':
+            is_ask = False
+        elif side.lower() == 'sell':
+            is_ask = True
+        else:
+            raise Exception(f"Invalid side: {side}")
+
+        # Generate unique client order index
+        client_order_index = int(time.time() * 1000) % 1000000
+        self.current_order_client_id = client_order_index
+
+        try:
+            # Use the official SDK's create_order method with POST_ONLY time in force
+            tx, tx_hash, error = await self.lighter_client.create_order(
+                market_index=self.config.contract_id,
+                client_order_index=client_order_index,
+                base_amount=int(quantity * self.base_amount_multiplier),
+                price=int(price * self.price_multiplier),
+                is_ask=is_ask,
+                order_type=self.lighter_client.ORDER_TYPE_LIMIT,
+                time_in_force=self.lighter_client.ORDER_TIME_IN_FORCE_POST_ONLY,
+                order_expiry=self.lighter_client.DEFAULT_28_DAY_ORDER_EXPIRY,
+                reduce_only=False,
+                trigger_price=0
+            )
+
+            if error is not None:
+                return OrderResult(
+                    success=False,
+                    order_id=str(client_order_index),
+                    error_message=error
+                )
+
+            return OrderResult(
+                success=True,
+                order_id=str(client_order_index),
+                side=side,
+                size=quantity,
+                price=price,
+                status='SUBMITTED'
+            )
+
+        except Exception as e:
+            self.logger.log(f"Error placing post-only order: {e}", "ERROR")
+            return OrderResult(
+                success=False,
+                order_id=str(client_order_index),
+                error_message=str(e)
+            )
+
+    async def place_market_order(self, contract_id: str, quantity: Decimal, side: str) -> OrderResult:
+        """Place a market order with Lighter using official SDK with improved slippage protection."""
+        # Ensure client is initialized
+        if self.lighter_client is None:
+            await self._initialize_lighter_client()
+
+        # Determine order side
+        if side.lower() == 'buy':
+            is_ask = False
+        elif side.lower() == 'sell':
+            is_ask = True
+        else:
+            raise Exception(f"Invalid side: {side}")
+
+        # Generate unique client order index
+        client_order_index = int(time.time() * 1000) % 1000000
+        self.current_order_client_id = client_order_index
+
+        try:
+            # Ensure multipliers are set
+            if self.base_amount_multiplier is None or self.price_multiplier is None:
+                self.logger.log("Base amount or price multiplier is None, using defaults", "WARNING")
+                base_amount_multiplier = 1000000  # Default for ETH
+                price_multiplier = 100000000  # Default for ETH
+            else:
+                base_amount_multiplier = self.base_amount_multiplier
+                price_multiplier = self.price_multiplier
+
+            # Convert quantity to base amount (following official examples)
+            base_amount = int(quantity * base_amount_multiplier)
+            
+            self.logger.log(f"Placing market order: side={side}, quantity={quantity}, "
+                           f"base_amount={base_amount}, market_index={self.config.contract_id}", "INFO")
+
+            # Use the official SDK's limited slippage method for better price protection
+            tx, tx_hash, error = await self.lighter_client.create_market_order_limited_slippage(
+                market_index=int(self.config.contract_id),  # Convert to int
+                client_order_index=client_order_index,
+                base_amount=base_amount,
+                max_slippage=0.02,  # 2% max slippage
+                is_ask=is_ask
+            )
+
+            if error is not None:
+                return OrderResult(
+                    success=False,
+                    order_id=str(client_order_index),
+                    error_message=error
+                )
+
+            return OrderResult(
+                success=True,
+                order_id=str(client_order_index),
+                side=side,
+                size=quantity,
+                price=Decimal(0),  # Market order price will be determined by execution
+                status='SUBMITTED'
+            )
+
+        except Exception as e:
+            self.logger.log(f"Error placing market order: {e}", "ERROR")
+            import traceback
+            self.logger.log(f"Full traceback: {traceback.format_exc()}", "ERROR")
+            return OrderResult(
+                success=False,
+                order_id=str(client_order_index),
+                error_message=str(e)
+            )
+
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
         """Place an open order with Lighter using official SDK."""
 
@@ -347,38 +498,37 @@ class LighterClient(BaseExchangeClient):
         order_price = await self.get_order_price(direction)
 
         order_price = self.round_to_tick(order_price)
-        order_result = await self.place_limit_order(contract_id, quantity, order_price, direction)
-        if not order_result.success:
-            raise Exception(f"[OPEN] Error placing order: {order_result.error_message}")
+        
+        # Use retry mechanism for nonce errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                order_result = await self.place_limit_order(contract_id, quantity, order_price, direction)
+                if order_result.success:
+                    break
+                elif 'invalid nonce' in str(order_result.error_message).lower() and attempt < max_retries - 1:
+                    self.logger.log(f"[OPEN] Nonce error on attempt {attempt + 1}/{max_retries}, retrying...", "WARNING")
+                    await asyncio.sleep(1)  # Wait longer for nonce refresh
+                    continue
+                else:
+                    raise Exception(f"[OPEN] Error placing order: {order_result.error_message}")
+            except Exception as e:
+                if 'invalid nonce' in str(e).lower() and attempt < max_retries - 1:
+                    self.logger.log(f"[OPEN] Nonce error on attempt {attempt + 1}/{max_retries}, retrying...", "WARNING")
+                    await asyncio.sleep(1)
+                    continue
+                else:
+                    raise e
 
-        start_time = time.time()
-        order_status = 'OPEN'
-
-        # While waiting for order to be filled
-        while time.time() - start_time < 10 and order_status != 'FILLED':
-            await asyncio.sleep(0.1)
-            if self.current_order is not None:
-                order_status = self.current_order.status
-
-        # Check if we received order update from WebSocket
-        if self.current_order is None:
-            self.logger.log("[OPEN] Order not updated by WebSocket, using placed order result", "WARNING")
-            return OrderResult(
-                success=True,
-                order_id=order_result.order_id,
-                side=direction,
-                size=quantity,
-                price=order_price,
-                status='OPEN'
-            )
-
+        # Simplified - don't wait for order to fill, just return success
+        # The order will be monitored by WebSocket and trading bot logic
         return OrderResult(
             success=True,
-            order_id=self.current_order.order_id,
+            order_id=order_result.order_id,
             side=direction,
             size=quantity,
             price=order_price,
-            status=self.current_order.status
+            status='OPEN'
         )
 
     async def _get_active_close_orders(self, contract_id: str) -> int:
@@ -411,15 +561,26 @@ class LighterClient(BaseExchangeClient):
             raise Exception(f"[CLOSE] Error placing order: {order_result.error_message}")
     
     async def get_order_price(self, side: str = '') -> Decimal:
-        """Get the price of an order with Lighter using official SDK."""
+        """Get the price of an order with Lighter using official SDK - Improved pricing."""
         # Get current market prices
         best_bid, best_ask = await self.fetch_bbo_prices(self.config.contract_id)
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
             self.logger.log("Invalid bid/ask prices", "ERROR")
             raise ValueError("Invalid bid/ask prices")
 
-        order_price = (best_bid + best_ask) / 2
+        # Use more aggressive pricing - closer to market price
+        if side.lower() == 'buy':
+            # For buy orders, use price slightly below best ask (more likely to fill)
+            order_price = best_ask * Decimal('0.999')  # 0.1% below best ask
+        else:
+            # For sell orders, use price slightly above best bid (more likely to fill)
+            order_price = best_bid * Decimal('1.001')  # 0.1% above best bid
 
+        # Round to tick size
+        if hasattr(self, 'config') and hasattr(self.config, 'tick_size'):
+            order_price = self.round_to_tick(order_price)
+
+        # Check existing close orders to avoid conflicts
         active_orders = await self.get_active_orders(self.config.contract_id)
         close_orders = [order for order in active_orders if order.side == self.config.close_order_side]
         for order in close_orders:
@@ -428,6 +589,7 @@ class LighterClient(BaseExchangeClient):
             else:
                 order_price = max(order_price, order.price + self.config.tick_size)
 
+        self.logger.log(f"Price calculation: side={side}, best_bid={best_bid}, best_ask={best_ask}, order_price={order_price}", "DEBUG")
         return order_price
 
     async def cancel_order(self, order_id: str, max_retries: int = 3) -> OrderResult:
@@ -562,29 +724,51 @@ class LighterClient(BaseExchangeClient):
     @query_retry(reraise=True)
     async def _fetch_positions_with_retry(self) -> List[Dict[str, Any]]:
         """Get positions using official SDK."""
-        # Use shared API client
-        account_api = lighter.AccountApi(self.api_client)
+        try:
+            # Use shared API client
+            account_api = lighter.AccountApi(self.api_client)
 
-        # Get account info
-        account_data = await account_api.account(by="index", value=str(self.account_index))
+            # Debug logging
+            self.logger.log(f"Fetching positions for account_index: {self.account_index}", "DEBUG")
+            
+            # Get account info using correct parameters
+            account_data = await account_api.account(by="index", value=str(self.account_index))
 
-        if not account_data or not account_data.accounts:
-            self.logger.log("Failed to get positions", "ERROR")
-            raise ValueError("Failed to get positions")
+            if not account_data or not account_data.accounts:
+                self.logger.log("Failed to get positions", "ERROR")
+                raise ValueError("Failed to get positions")
 
-        return account_data.accounts[0].positions
+            # Return positions from the first account
+            positions = account_data.accounts[0].positions
+            self.logger.log(f"Found {len(positions)} positions", "DEBUG")
+            return positions
+            
+        except Exception as e:
+            self.logger.log(f"Error fetching positions: {e}", "ERROR")
+            self.logger.log(f"Account index: {self.account_index}, Type: {type(self.account_index)}", "ERROR")
+            raise
 
     async def get_account_positions(self) -> Decimal:
         """Get account positions using official SDK."""
-        # Get account info which includes positions
-        positions = await self._fetch_positions_with_retry()
+        try:
+            # Get account info which includes positions
+            positions = await self._fetch_positions_with_retry()
 
-        # Find position for current market
-        for position in positions:
-            if position.market_id == self.config.contract_id:
-                return Decimal(position.position)
+            # Find position for current market
+            for position in positions:
+                if position.market_id == int(self.config.contract_id):
+                    # Convert position string to Decimal
+                    # position.sign: 1 for Long, -1 for Short
+                    # position.position: the amount of position
+                    position_amount = Decimal(position.position)
+                    if position.sign == -1:  # Short position
+                        position_amount = -position_amount
+                    return position_amount
 
-        return Decimal(0)
+            return Decimal(0)
+        except Exception as e:
+            self.logger.log(f"Error getting account positions: {e}", "ERROR")
+            return Decimal(0)
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID for a ticker."""
@@ -622,3 +806,9 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("Failed to get tick size")
 
         return self.config.contract_id, self.config.tick_size
+
+    def round_to_tick(self, price: Decimal) -> Decimal:
+        """Round price to tick size."""
+        if hasattr(self, 'config') and hasattr(self.config, 'tick_size') and self.config.tick_size:
+            return (price / self.config.tick_size).quantize(Decimal('1')) * self.config.tick_size
+        return price

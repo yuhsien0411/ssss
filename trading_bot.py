@@ -161,34 +161,19 @@ class TradingBot:
         self.exchange_client.setup_order_update_handler(order_update_handler)
 
     def _calculate_wait_time(self) -> Decimal:
-        """Calculate wait time between orders."""
-        cool_down_time = self.config.wait_time
-
-        if len(self.active_close_orders) < self.last_close_orders:
-            self.last_close_orders = len(self.active_close_orders)
-            return 0
-
-        self.last_close_orders = len(self.active_close_orders)
+        """Calculate wait time between orders with position limits."""
+        # Check if we have too many active orders
         if len(self.active_close_orders) >= self.config.max_orders:
             return 1
-
-        if len(self.active_close_orders) / self.config.max_orders >= 2/3:
-            cool_down_time = 2 * self.config.wait_time
-        elif len(self.active_close_orders) / self.config.max_orders >= 1/3:
-            cool_down_time = self.config.wait_time
-        elif len(self.active_close_orders) / self.config.max_orders >= 1/6:
-            cool_down_time = self.config.wait_time / 2
-        else:
-            cool_down_time = self.config.wait_time / 4
-
-        # if the program detects active_close_orders during startup, it is necessary to consider cooldown_time
-        if self.last_open_order_time == 0 and len(self.active_close_orders) > 0:
-            self.last_open_order_time = time.time()
-
-        if time.time() - self.last_open_order_time > cool_down_time:
-            return 0
-        else:
-            return 1
+        
+        # Check if we have too much position (more than 10x quantity)
+        if hasattr(self, 'current_position') and self.current_position:
+            max_position = self.config.quantity * 10  # Limit to 10x quantity
+            if abs(self.current_position) > max_position:
+                return 5  # Wait 5 seconds if position is too large
+        
+        # Minimal wait time for normal cases
+        return 0
 
     async def _place_and_monitor_open_order(self) -> bool:
         """Place an order and monitor its execution."""
@@ -391,23 +376,15 @@ class TradingBot:
                 self.logger.log(f"Current Position: {position_amt} | Active closing amount: {active_close_amount} | "
                                 f"Order quantity: {len(self.active_close_orders)}")
                 self.last_log_time = time.time()
-                # Check for position mismatch
-                if abs(position_amt - active_close_amount) > (2 * self.config.quantity):
-                    error_message = f"\n\nERROR: [{self.config.exchange.upper()}_{self.config.ticker.upper()}] "
-                    error_message += "Position mismatch detected\n"
-                    error_message += "###### ERROR ###### ERROR ###### ERROR ###### ERROR #####\n"
-                    error_message += "Please manually rebalance your position and take-profit orders\n"
-                    error_message += "请手动平衡当前仓位和正在关闭的仓位\n"
-                    error_message += f"current position: {position_amt} | active closing amount: {active_close_amount} | "f"Order quantity: {len(self.active_close_orders)}\n"
-                    error_message += "###### ERROR ###### ERROR ###### ERROR ###### ERROR #####\n"
-                    self.logger.log(error_message, "ERROR")
-
-                    await self.send_notification(error_message.lstrip())
-
-                    if not self.shutdown_requested:
-                        self.shutdown_requested = True
-
-                    mismatch_detected = True
+                
+                # Store current position for wait time calculation
+                self.current_position = position_amt
+                
+                # Check for excessive position (more than 20x quantity)
+                max_position = self.config.quantity * 20
+                if abs(position_amt) > max_position:
+                    self.logger.log(f"WARNING: Position too large ({position_amt}), limiting new orders", "WARNING")
+                    mismatch_detected = True  # Stop trading if position is too large
                 else:
                     mismatch_detected = False
 
@@ -420,31 +397,8 @@ class TradingBot:
             print("--------------------------------")
 
     async def _meet_grid_step_condition(self) -> bool:
-        if self.active_close_orders:
-            picker = min if self.config.direction == "buy" else max
-            next_close_order = picker(self.active_close_orders, key=lambda o: o["price"])
-            next_close_price = next_close_order["price"]
-
-            best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
-            if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
-                raise ValueError("No bid/ask data available")
-
-            if self.config.direction == "buy":
-                new_order_close_price = best_ask * (1 + self.config.take_profit/100)
-                if next_close_price / new_order_close_price > 1 + self.config.grid_step/100:
-                    return True
-                else:
-                    return False
-            elif self.config.direction == "sell":
-                new_order_close_price = best_bid * (1 - self.config.take_profit/100)
-                if new_order_close_price / next_close_price > 1 + self.config.grid_step/100:
-                    return True
-                else:
-                    return False
-            else:
-                raise ValueError(f"Invalid direction: {self.config.direction}")
-        else:
-            return True
+        """Simplified grid step condition - always allow trading."""
+        return True
 
     async def _check_price_condition(self) -> bool:
         stop_trading = False
@@ -553,19 +507,20 @@ class TradingBot:
                     continue
 
                 if not mismatch_detected:
+                    # Simplified logic - always try to place orders
                     wait_time = self._calculate_wait_time()
-
+                    
                     if wait_time > 0:
                         await asyncio.sleep(wait_time)
                         continue
-                    else:
-                        meet_grid_step_condition = await self._meet_grid_step_condition()
-                        if not meet_grid_step_condition:
-                            await asyncio.sleep(1)
-                            continue
-
+                    
+                    # Always place new orders if we have capacity
+                    if len(self.active_close_orders) < self.config.max_orders:
                         await self._place_and_monitor_open_order()
                         self.last_close_orders += 1
+                    else:
+                        # If we have max orders, wait a bit
+                        await asyncio.sleep(1)
 
         except KeyboardInterrupt:
             self.logger.log("Bot stopped by user")

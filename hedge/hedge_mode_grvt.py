@@ -9,6 +9,7 @@ import requests
 import argparse
 import traceback
 import csv
+import datetime
 from decimal import Decimal
 from typing import Tuple
 
@@ -18,6 +19,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from exchanges.grvt import GrvtClient
+from exchanges.lighter import LighterClient
 import websockets
 from datetime import datetime
 import pytz
@@ -33,7 +35,7 @@ class Config:
 class HedgeBot:
     """Trading bot that places post-only orders on GRVT and hedges with market orders on Lighter."""
 
-    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 5, iterations: int = 20):
+    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 30, iterations: int = 20):
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.fill_timeout = fill_timeout
@@ -90,9 +92,13 @@ class HedgeBot:
         file_handler = logging.FileHandler(self.log_filename)
         file_handler.setLevel(logging.INFO)
 
-        # Create console handler
+        # Create console handler with UTF-8 encoding
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
+        
+        # Set UTF-8 encoding for console output
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8')
 
         # Create different formatters for file and console
         file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -152,6 +158,11 @@ class HedgeBot:
 
         # Order execution tracking
         self.order_execution_complete = False
+        
+        # 艙位快照相關
+        self.position_snapshot_interval = 1  # 1秒快照一次
+        self.last_snapshot_time = 0
+        self.position_snapshots = []  # 存儲歷史快照
 
         # Current order details for immediate execution
         self.current_lighter_side = None
@@ -175,13 +186,21 @@ class HedgeBot:
         self.stop_flag = True
         self.logger.info("\n🛑 Stopping...")
 
-        # Cancel Lighter WebSocket task
+        # Cancel Lighter WebSocket task immediately
         if self.lighter_ws_task and not self.lighter_ws_task.done():
             try:
                 self.lighter_ws_task.cancel()
                 self.logger.info("🔌 Lighter WebSocket task cancelled")
             except Exception as e:
                 self.logger.error(f"Error cancelling Lighter WebSocket task: {e}")
+
+        # Cancel GRVT WebSocket if exists
+        if hasattr(self, 'grvt_ws_task') and self.grvt_ws_task and not self.grvt_ws_task.done():
+            try:
+                self.grvt_ws_task.cancel()
+                self.logger.info("🔌 GRVT WebSocket task cancelled")
+            except Exception as e:
+                self.logger.error(f"Error cancelling GRVT WebSocket task: {e}")
 
         # Close logging handlers properly
         for handler in self.logger.handlers[:]:
@@ -194,23 +213,42 @@ class HedgeBot:
     async def async_shutdown(self):
         """Async shutdown handler for proper resource cleanup."""
         try:
-            # No GRVT WebSocket to disconnect (using REST API only)
-            self.logger.info("✅ GRVT REST API only mode - no WebSocket to disconnect")
-
-            # Cancel Lighter WebSocket task if still running
+            self.logger.info("🔄 Starting async cleanup...")
+            
+            # Cancel all WebSocket tasks with timeout
+            tasks_to_cancel = []
+            
             if self.lighter_ws_task and not self.lighter_ws_task.done():
+                tasks_to_cancel.append(self.lighter_ws_task)
+                
+            if hasattr(self, 'grvt_ws_task') and self.grvt_ws_task and not self.grvt_ws_task.done():
+                tasks_to_cancel.append(self.grvt_ws_task)
+            
+            if tasks_to_cancel:
+                self.logger.info(f"🔌 Cancelling {len(tasks_to_cancel)} WebSocket tasks...")
+                
+                # Cancel all tasks
+                for task in tasks_to_cancel:
+                    task.cancel()
+                
+                # Wait for cancellation with timeout
                 try:
-                    self.lighter_ws_task.cancel()
-                    try:
-                        await self.lighter_ws_task
-                    except asyncio.CancelledError:
-                        pass
-                    self.logger.info("✅ Lighter WebSocket task cancelled")
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks_to_cancel, return_exceptions=True),
+                        timeout=2.0  # 2 second timeout
+                    )
+                    self.logger.info("✅ All WebSocket tasks cancelled successfully")
+                except asyncio.TimeoutError:
+                    self.logger.warning("⚠️ Timeout waiting for WebSocket tasks to cancel")
                 except Exception as e:
-                    self.logger.error(f"❌ Error cancelling Lighter WebSocket task: {e}")
+                    self.logger.warning(f"⚠️ Error during task cancellation: {e}")
+            else:
+                self.logger.info("✅ No WebSocket tasks to cancel")
 
         except Exception as e:
             self.logger.error(f"❌ Error during async shutdown: {e}")
+        finally:
+            self.logger.info("✅ Async cleanup completed")
 
     def _initialize_csv_file(self):
         """Initialize CSV file with headers if it doesn't exist."""
@@ -313,15 +351,34 @@ class HedgeBot:
             import traceback
             self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
 
+    async def get_lighter_actual_position(self) -> Decimal:
+        """Get actual Lighter position."""
+        try:
+            # 暫時使用內部狀態，避免 API 驗證錯誤
+            # TODO: 修復 Lighter API 驗證問題後重新啟用
+            self.logger.debug(f"📊 Using internal Lighter position: {self.lighter_position}")
+            return self.lighter_position
+            
+            # 原始 API 查詢（暫時禁用）
+            # if not self.lighter_client:
+            #     return Decimal(0)
+            # 
+            # position = await self.lighter_client.get_account_positions()
+            # self.lighter_position = position
+            # return position
+        except Exception as e:
+            self.logger.error(f"❌ Error getting Lighter position: {e}")
+            return Decimal(0)
+
     async def get_grvt_actual_position(self) -> Decimal:
         """查詢 GRVT 實際持倉"""
         try:
             # 使用 GRVT API 查詢持倉
             positions = await self.grvt_client.get_positions()
-            if positions.success:
-                for position in positions.result:
-                    if position.contract_id == self.grvt_contract_id:
-                        return Decimal(str(position.size))
+            if positions:
+                for position in positions:
+                    if position.get('instrument') == self.grvt_contract_id:
+                        return Decimal(str(position.get('size', 0)))
             return Decimal('0')
         except Exception as e:
             self.logger.error(f"❌ Error getting GRVT position: {e}")
@@ -472,27 +529,13 @@ class HedgeBot:
                     # Subscribe to account orders updates
                     account_orders_channel = f"account_orders/{self.lighter_market_index}/{self.account_index}"
 
-                    # Get auth token for the subscription
-                    try:
-                        # Set auth token to expire in 10 minutes
-                        ten_minutes_deadline = int(time.time() + 10 * 60)
-                        auth_token, err = self.lighter_client.create_auth_token_with_expiry(ten_minutes_deadline)
-                        if err is not None:
-                            self.logger.warning(f"⚠️ Failed to create auth token for account orders subscription: {err}")
-                        else:
-                            auth_message = {
-                                "type": "subscribe",
-                                "channel": account_orders_channel,
-                                "auth": auth_token
-                            }
-                            await ws.send(json.dumps(auth_message))
-                            self.logger.info("✅ Subscribed to account orders with auth token (expires in 10 minutes)")
-                    except Exception as e:
-                        self.logger.warning(f"⚠️ Error creating auth token for account orders subscription: {e}")
+                    # Skip auth token for now - we'll use REST API for order monitoring
+                    self.logger.info("ℹ️ Skipping account orders subscription (using REST API for order monitoring)")
 
                     while not self.stop_flag:
                         try:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=1)
+                            # 更頻繁檢查停止信號
+                            msg = await asyncio.wait_for(ws.recv(), timeout=0.5)  # 減少超時時間
 
                             try:
                                 data = json.loads(msg)
@@ -593,8 +636,11 @@ class HedgeBot:
 
                         except asyncio.TimeoutError:
                             timeout_count += 1
-                            if timeout_count % 3 == 0:
-                                self.logger.warning(f"⏰ No message from Lighter websocket for {timeout_count} seconds")
+                            if timeout_count % 6 == 0:  # 每3秒警告一次（0.5s * 6）
+                                self.logger.warning(f"⏰ No message from Lighter websocket for {timeout_count * 0.5:.1f} seconds")
+                            # 檢查停止信號
+                            if self.stop_flag:
+                                break
                             continue
                         except websockets.exceptions.ConnectionClosed as e:
                             self.logger.warning(f"⚠️ Lighter websocket connection closed: {e}")
@@ -617,25 +663,35 @@ class HedgeBot:
         signal.signal(signal.SIGINT, self.shutdown)
         signal.signal(signal.SIGTERM, self.shutdown)
 
-    def initialize_lighter_client(self):
+    async def initialize_lighter_client(self):
         """Initialize the Lighter client."""
-        if self.lighter_client is None:            
-            api_key_private_key = os.getenv('API_KEY_PRIVATE_KEY')
-            if not api_key_private_key:
-                raise Exception("API_KEY_PRIVATE_KEY environment variable not set")
-
-            self.lighter_client = SignerClient(
-                url=self.lighter_base_url,
-                private_key=api_key_private_key,
-                account_index=self.account_index,
-                api_key_index=self.api_key_index,
-            )
-
-            # Check client
-            err = self.lighter_client.check_client()
-            if err is not None:
-                raise Exception(f"CheckClient error: {err}")
-
+        if self.lighter_client is None:
+            # Ensure market config is loaded
+            if not hasattr(self, 'lighter_market_index') or self.lighter_market_index is None:
+                self.lighter_market_index, self.base_amount_multiplier, self.price_multiplier = self.get_lighter_market_config()
+            
+            # Create config for Lighter client
+            config_dict = {
+                'ticker': self.ticker,
+                'contract_id': str(self.lighter_market_index),
+                'quantity': self.order_quantity,
+                'tick_size': Decimal('0.01'),  # Will be updated when we get contract info
+                'close_order_side': 'sell'  # Default, will be updated based on strategy
+            }
+            
+            # Wrap in Config class for Lighter client
+            config = Config(config_dict)
+            
+            # Initialize Lighter client
+            self.lighter_client = LighterClient(config)
+            
+            # Set the multipliers in the client
+            self.lighter_client.base_amount_multiplier = self.base_amount_multiplier
+            self.lighter_client.price_multiplier = self.price_multiplier
+            
+            # Initialize the client
+            await self.lighter_client._initialize_lighter_client()
+            
             self.logger.info("✅ Lighter client initialized successfully")
         return self.lighter_client
 
@@ -721,16 +777,47 @@ class HedgeBot:
 
     async def place_bbo_order(self, side: str, quantity: Decimal):
         # Place the order using GRVT client
-        order_result = await self.grvt_client.place_open_order(
-            contract_id=self.grvt_contract_id,
-            quantity=quantity,
-            direction=side.lower()
-        )
-
-        if order_result.success:
-            return order_result.order_id, order_result.price
-        else:
-            raise Exception(f"Failed to place order: {order_result.error_message}")
+        try:
+            # Get best bid/ask prices
+            best_bid, best_ask = await self.fetch_grvt_bbo_prices()
+            
+            self.logger.info(f"📊 GRVT Market: Best Bid={best_bid}, Best Ask={best_ask}")
+            
+            # Calculate order price for post-only orders (must be inside spread)
+            if side.lower() == 'buy':
+                # For buy orders, price must be BELOW best ask (inside spread)
+                # Use tick size to ensure we're just inside the spread
+                tick_adjustment = self.grvt_tick_size if self.grvt_tick_size else Decimal('0.01')
+                order_price = best_ask - tick_adjustment
+                self.logger.info(f"💰 BUY Order Price: {order_price} (Best Ask: {best_ask} - {tick_adjustment})")
+            else:
+                # For sell orders, price must be ABOVE best bid (inside spread)
+                # Use tick size to ensure we're just inside the spread
+                tick_adjustment = self.grvt_tick_size if self.grvt_tick_size else Decimal('0.01')
+                order_price = best_bid + tick_adjustment
+                self.logger.info(f"💰 SELL Order Price: {order_price} (Best Bid: {best_bid} + {tick_adjustment})")
+            
+            # Round to tick size
+            order_price = self.round_to_tick(order_price)
+            
+            # Place post-only order with market-matching price
+            self.logger.info(f"📝 Placing {side.upper()} post-only order: {quantity} @ {order_price}")
+            order_result = await self.grvt_client.place_post_only_order(
+                contract_id=self.grvt_contract_id,
+                quantity=quantity,
+                price=order_price,
+                side=side.lower()
+            )
+            
+            if order_result.success:
+                self.logger.info(f"✅ Order placed successfully: {order_result.order_id}")
+                return order_result.order_id, order_price
+            else:
+                self.logger.error(f"❌ Order rejected: {order_result.error_message}")
+                raise Exception(f"Failed to place order: {order_result.error_message}")
+        except Exception as e:
+            self.logger.error(f"Error placing GRVT order: {e}")
+            raise
 
     async def place_grvt_post_only_order(self, side: str, quantity: Decimal):
         """Place a post-only order on GRVT using position change detection."""
@@ -754,18 +841,24 @@ class HedgeBot:
                 self.logger.info(f"📝 GRVT order placed: {order_id} @ {order_price}")
                 
                 # 等待一段時間讓訂單有機會成交
-                wait_duration = 8 if retry_count == 0 else 5
+                wait_duration = self.fill_timeout
                 self.logger.info(f"⏳ Waiting {wait_duration}s for order to fill...")
-                await asyncio.sleep(wait_duration)
+                self.logger.info(f"🎯 Order Details: {side.upper()} {quantity} @ {order_price}")
+                
+                # 分段等待並顯示進度
+                for i in range(wait_duration):
+                    await asyncio.sleep(1)
+                    if i % 5 == 0:  # 每5秒顯示一次進度
+                        self.logger.info(f"⏰ Waiting... {i+1}/{wait_duration}s elapsed")
                 
                 # 撤銷所有掛單（無論是否成交）
                 self.logger.info(f"🗑️ Canceling all open orders...")
                 try:
                     cancel_result = await self.grvt_client.cancel_all_orders()
-                    if cancel_result.success:
+                    if cancel_result.get("success", False):
                         self.logger.info(f"✅ All orders canceled successfully")
                     else:
-                        self.logger.warning(f"⚠️ Cancel all orders returned: {cancel_result.error_message}")
+                        self.logger.warning(f"⚠️ Cancel all orders returned: {cancel_result.get('error_message', 'Unknown error')}")
                 except Exception as e:
                     self.logger.warning(f"⚠️ Error canceling orders: {e}")
                 
@@ -777,6 +870,8 @@ class HedgeBot:
                 # 計算持倉變化
                 position_change = position_after - position_before
                 self.logger.info(f"📊 Position change: {position_change}")
+                self.logger.info(f"📊 Position change abs: {abs(position_change)}")
+                self.logger.info(f"📊 Threshold: {Decimal('0.001')}")
                 
                 # 如果持倉有變化，表示訂單已成交
                 if abs(position_change) >= Decimal('0.001'):  # 允許小誤差
@@ -787,17 +882,53 @@ class HedgeBot:
                     self.grvt_position = position_after
                     self.logger.info(f"📊 GRVT position updated: {self.grvt_position}")
                     
-                    # 觸發 Lighter 對沖
-                    self.waiting_for_lighter_fill = True
-                    self.current_lighter_side = 'sell' if side.lower() == 'buy' else 'buy'
-                    self.current_lighter_quantity = filled_size
-                    self.current_lighter_price = order_price
+                    # 立即執行 Lighter 對沖訂單
+                    lighter_side = 'sell' if side.lower() == 'buy' else 'buy'
+                    self.logger.info(f"🎯 GRVT order filled! Placing Lighter {lighter_side} order...")
+                    self.logger.info(f"🔍 GRVT side: {side}, Lighter side: {lighter_side}, Quantity: {filled_size}")
+                    self.logger.info(f"🔍 Current GRVT position: {self.grvt_position}, Lighter position: {self.lighter_position}")
                     
-                    self.logger.info(f"🔔 Triggering Lighter hedge: {self.current_lighter_side} {filled_size} @ {order_price}")
+                    # 判斷是開倉還是平倉
+                    if side.lower() == 'buy':
+                        self.logger.info(f"📈 GRVT BUY order filled - Opening Long position, Lighter should SELL to hedge")
+                    else:
+                        self.logger.info(f"📉 GRVT SELL order filled - Closing Long position, Lighter should BUY to hedge")
                     
+                    # 下 Lighter 市價訂單對沖
+                    try:
+                        # Ensure Lighter client is initialized
+                        await self.initialize_lighter_client()
+                        
+                        # Use the proper Lighter client market order method
+                        lighter_result = await self.lighter_client.place_market_order(
+                            contract_id=str(self.lighter_market_index),
+                            quantity=filled_size,
+                            side=lighter_side
+                        )
+                        
+                        if lighter_result.success:
+                            self.logger.info(f"✅ Lighter hedge order placed successfully: {lighter_result.order_id}")
+                            
+                            # 更新內部 Lighter 持倉狀態
+                            if lighter_side.lower() == 'sell':
+                                self.lighter_position -= filled_size  # 賣單減少持倉
+                            else:
+                                self.lighter_position += filled_size  # 買單增加持倉
+                            
+                            self.logger.info(f"📊 Lighter position after hedge: {self.lighter_position}")
+                        else:
+                            self.logger.error(f"❌ Failed to place Lighter hedge order: {lighter_result.error_message}")
+                    except Exception as e:
+                        self.logger.error(f"❌ Error placing Lighter hedge order: {e}")
+                        import traceback
+                        self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+                    
+                    # 設置執行完成標誌
+                    self.order_execution_complete = True
                     return  # 成功成交，退出函數
                 else:
                     self.logger.warning(f"⚠️ No position change detected, order likely not filled")
+                    self.logger.warning(f"⚠️ Position change {position_change} is less than threshold {Decimal('0.001')}")
                     retry_count += 1
                     if retry_count < max_retries:
                         self.logger.warning(f"⚠️ Retrying ({retry_count}/{max_retries})...")
@@ -840,6 +971,130 @@ class HedgeBot:
         }
 
         self.waiting_for_lighter_fill = True
+        
+        # 立即設置執行完成標誌，避免等待持倉變化檢測
+        self.order_execution_complete = True
+        
+        self.logger.info(f"🎯 GRVT WebSocket order filled! Triggering immediate Lighter {lighter_side} hedge...")
+        
+        # 創建異步任務立即執行對沖訂單
+        import asyncio
+        asyncio.create_task(self.execute_immediate_hedge(lighter_side, filled_size))
+
+    async def take_position_snapshot(self):
+        """拍攝艙位快照"""
+        try:
+            current_time = time.time()
+            
+            # 獲取當前持倉
+            grvt_position = await self.get_grvt_actual_position()
+            lighter_position = await self.get_lighter_actual_position()
+            
+            # 計算持倉差異
+            position_diff = grvt_position + lighter_position
+            
+            # 創建快照
+            snapshot = {
+                'timestamp': current_time,
+                'datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'grvt_position': float(grvt_position),
+                'lighter_position': float(lighter_position),
+                'position_diff': float(position_diff),
+                'grvt_position_abs': abs(float(grvt_position)),
+                'lighter_position_abs': abs(float(lighter_position)),
+                'hedge_ratio': abs(float(lighter_position) / float(grvt_position)) if grvt_position != 0 else 0,
+                'is_hedged': abs(position_diff) < 0.001  # 允許小誤差
+            }
+            
+            # 添加到歷史快照
+            self.position_snapshots.append(snapshot)
+            
+            # 保持最近100個快照
+            if len(self.position_snapshots) > 100:
+                self.position_snapshots = self.position_snapshots[-100:]
+            
+            # 記錄快照
+            self.logger.info(f"📸 Position Snapshot: GRVT={grvt_position:.4f}, Lighter={lighter_position:.4f}, Diff={position_diff:.4f}, Hedged={snapshot['is_hedged']}")
+            
+            return snapshot
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error taking position snapshot: {e}")
+            import traceback
+            self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            return None
+
+    async def check_and_take_snapshot(self):
+        """檢查是否需要拍攝快照"""
+        current_time = time.time()
+        if current_time - self.last_snapshot_time >= self.position_snapshot_interval:
+            self.last_snapshot_time = current_time
+            await self.take_position_snapshot()
+
+    def print_position_summary(self):
+        """打印持倉摘要"""
+        if not self.position_snapshots:
+            self.logger.info("📊 No position snapshots available")
+            return
+        
+        latest = self.position_snapshots[-1]
+        self.logger.info("=" * 60)
+        self.logger.info("📊 POSITION SUMMARY")
+        self.logger.info("=" * 60)
+        self.logger.info(f"🕐 Time: {latest['datetime']}")
+        self.logger.info(f"📈 GRVT Position: {latest['grvt_position']:.4f}")
+        self.logger.info(f"📉 Lighter Position: {latest['lighter_position']:.4f}")
+        self.logger.info(f"⚖️ Position Diff: {latest['position_diff']:.4f}")
+        self.logger.info(f"🎯 Hedge Ratio: {latest['hedge_ratio']:.4f}")
+        self.logger.info(f"✅ Fully Hedged: {latest['is_hedged']}")
+        self.logger.info("=" * 60)
+        
+        # 顯示最近5個快照的趨勢
+        if len(self.position_snapshots) >= 5:
+            self.logger.info("📈 Recent Trend (Last 5 snapshots):")
+            for snapshot in self.position_snapshots[-5:]:
+                self.logger.info(f"  {snapshot['datetime']}: GRVT={snapshot['grvt_position']:.4f}, Lighter={snapshot['lighter_position']:.4f}, Diff={snapshot['position_diff']:.4f}")
+
+    def save_snapshots_to_csv(self):
+        """保存快照到CSV文件"""
+        if not self.position_snapshots:
+            return
+        
+        csv_filename = f"logs/position_snapshots_{self.config.ticker}.csv"
+        try:
+            import csv
+            with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['timestamp', 'datetime', 'grvt_position', 'lighter_position', 'position_diff', 
+                             'grvt_position_abs', 'lighter_position_abs', 'hedge_ratio', 'is_hedged']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self.position_snapshots)
+            
+            self.logger.info(f"💾 Position snapshots saved to {csv_filename}")
+        except Exception as e:
+            self.logger.error(f"❌ Error saving snapshots to CSV: {e}")
+
+    async def execute_immediate_hedge(self, lighter_side: str, quantity: Decimal):
+        """立即執行對沖訂單，不等待主循環"""
+        try:
+            # Lighter 客戶端應該已經預先初始化，直接使用
+            if not self.lighter_client:
+                self.logger.warning("⚠️ Lighter client not initialized, initializing now...")
+                await self.initialize_lighter_client()
+            
+            # 使用正確的 Lighter 客戶端市價訂單方法
+            lighter_result = await self.lighter_client.place_market_order(
+                contract_id=str(self.lighter_market_index),
+                quantity=quantity,
+                side=lighter_side
+            )
+            
+            if lighter_result.success:
+                self.logger.info(f"✅ Lighter hedge order placed successfully: {lighter_result.order_id}")
+            else:
+                self.logger.error(f"❌ Failed to place Lighter hedge order: {lighter_result.error_message}")
+        except Exception as e:
+            self.logger.error(f"❌ Error placing Lighter hedge order: {e}")
 
     async def place_lighter_market_order(self, lighter_side: str, quantity: Decimal, price: Decimal):
         if not self.lighter_client:
@@ -847,15 +1102,17 @@ class HedgeBot:
 
         best_bid, best_ask = self.get_lighter_best_levels()
 
-        # Determine order parameters
+        # Determine order parameters for market order (aggressive pricing)
         if lighter_side.lower() == 'buy':
             order_type = "CLOSE"
             is_ask = False
-            price = best_ask[0] * Decimal('1.002')
+            # For buy market order, use price significantly above best ask to ensure immediate fill
+            price = best_ask[0] * Decimal('1.01')  # 1% above best ask
         else:
             order_type = "OPEN"
             is_ask = True
-            price = best_bid[0] * Decimal('0.998')
+            # For sell market order, use price significantly below best bid to ensure immediate fill
+            price = best_bid[0] * Decimal('0.99')  # 1% below best bid
 
 
         # Reset order state
@@ -1077,7 +1334,7 @@ class HedgeBot:
 
         # Initialize clients
         try:
-            self.initialize_lighter_client()
+            await self.initialize_lighter_client()
             self.initialize_grvt_client()
 
             # Get contract info
@@ -1091,8 +1348,13 @@ class HedgeBot:
             self.logger.error(f"❌ Failed to initialize: {e}")
             return
 
-        # Skip GRVT WebSocket setup - use REST API only for order status
-        self.logger.info("✅ Using REST API only for GRVT order status (skipping WebSocket)")
+        # Setup GRVT WebSocket for order updates
+        try:
+            await self.setup_grvt_websocket()
+            self.logger.info("✅ GRVT WebSocket connection established")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to setup GRVT websocket: {e}")
+            self.logger.info("⚠️ Falling back to REST API only for GRVT order status")
 
         # Setup Lighter websocket
         try:
@@ -1120,6 +1382,17 @@ class HedgeBot:
 
         await asyncio.sleep(5)
 
+        # 預先初始化 Lighter 客戶端以減少對沖延遲
+        try:
+            await self.initialize_lighter_client()
+            self.logger.info("✅ Lighter client pre-initialized for faster hedging")
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to pre-initialize Lighter client: {e}")
+        
+        # 拍攝初始快照
+        await self.take_position_snapshot()
+        self.logger.info("📸 Initial position snapshot taken")
+        
         iterations = 0
         while iterations < self.iterations and not self.stop_flag:
             iterations += 1
@@ -1127,7 +1400,19 @@ class HedgeBot:
             self.logger.info(f"🔄 Trading loop iteration {iterations}")
             self.logger.info("-----------------------------------------------")
 
-            self.logger.info(f"[STEP 1] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
+            # 拍攝快照
+            await self.check_and_take_snapshot()
+            
+            # 顯示詳細的對沖狀態
+            position_diff = abs(self.grvt_position + self.lighter_position)
+            hedge_status = "✅ FULLY HEDGED" if position_diff < 0.001 else f"⚠️ NOT HEDGED (diff: {position_diff:.4f})"
+            
+            self.logger.info("=" * 80)
+            self.logger.info(f"📊 CURRENT HEDGE STATUS: {hedge_status}")
+            self.logger.info(f"📈 GRVT Position: {self.grvt_position:.4f}")
+            self.logger.info(f"📉 Lighter Position: {self.lighter_position:.4f}")
+            self.logger.info(f"⚖️ Position Difference: {position_diff:.4f}")
+            self.logger.info("=" * 80)
 
             if abs(self.grvt_position + self.lighter_position) > 0.2:
                 self.logger.error(f"❌ Position diff is too large: {self.grvt_position + self.lighter_position}")
@@ -1156,6 +1441,9 @@ class HedgeBot:
                         self.current_lighter_price
                     )
                     break
+                
+                # 檢查是否需要拍攝快照
+                await self.check_and_take_snapshot()
                 
                 await asyncio.sleep(0.01)
                 if time.time() - start_time > 180:
@@ -1249,12 +1537,48 @@ class HedgeBot:
             await self.trading_loop()
         except KeyboardInterrupt:
             self.logger.info("\n🛑 Received interrupt signal...")
+        except Exception as e:
+            self.logger.error(f"❌ Unexpected error: {e}")
+            import traceback
+            self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
         finally:
             self.logger.info("🔄 Cleaning up...")
-            # First call sync shutdown to set stop flag and basic cleanup
+            
+            # 快速清理，避免卡住
+            try:
+                # 拍攝最終快照（快速）
+                await asyncio.wait_for(self.take_position_snapshot(), timeout=1.0)
+                self.logger.info("📸 Final position snapshot taken")
+            except asyncio.TimeoutError:
+                self.logger.warning("⚠️ Timeout taking final snapshot")
+            except Exception as e:
+                self.logger.error(f"❌ Error taking final snapshot: {e}")
+            
+            # 打印持倉摘要（快速）
+            try:
+                self.print_position_summary()
+            except Exception as e:
+                self.logger.error(f"❌ Error printing position summary: {e}")
+            
+            # 保存快照到CSV（快速）
+            try:
+                self.save_snapshots_to_csv()
+            except Exception as e:
+                self.logger.error(f"❌ Error saving snapshots: {e}")
+            
+            # 快速關閉
+            self.logger.info("🚀 Quick shutdown...")
             self.shutdown()
-            # Then call async shutdown for proper WebSocket cleanup
-            await self.async_shutdown()
+            
+            # 異步清理（帶超時）
+            try:
+                await asyncio.wait_for(self.async_shutdown(), timeout=3.0)
+            except asyncio.TimeoutError:
+                self.logger.warning("⚠️ Timeout during async shutdown")
+            except Exception as e:
+                self.logger.error(f"❌ Error during async shutdown: {e}")
+            
+            self.logger.info("✅ Shutdown completed")
 
 
 def parse_arguments():
@@ -1268,7 +1592,7 @@ def parse_arguments():
                         help='Number of tokens to buy/sell per order')
     parser.add_argument('--iter', type=int,
                         help='Number of iterations to run')
-    parser.add_argument('--fill-timeout', type=int, default=5,
-                        help='Timeout in seconds for maker order fills (default: 5)')
+    parser.add_argument('--fill-timeout', type=int, default=30,
+                        help='Timeout in seconds for maker order fills (default: 30)')
 
     return parser.parse_args()

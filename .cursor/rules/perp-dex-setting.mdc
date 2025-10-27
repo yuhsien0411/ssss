@@ -1,5 +1,7 @@
 ---
 alwaysApply: true
 ---
-現在終端機的是digital ocean 雲端的，你無法直接調用，你會用到本地的終端機，因為lighter skd只能在mac,linux上跑
-你給我會用到的指令，需要修改程式碼修改本地的並推送到github，我的雲端會拉取更新
+
+現在終端機的是digital ocean 雲端的，你無法直接調用，你會用到本地的終端機，因為lighter sdk只能在mac,linux上跑
+你給我會用到的指令
+你在本地需要修改程式碼修改本地的並推送到github，我的雲端會拉取更新

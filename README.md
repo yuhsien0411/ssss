@@ -274,6 +274,8 @@ BTC：
 
 ```bash
 python runbot.py --exchange grvt --ticker BTC --quantity 0.05 --take-profit 0.02 --max-orders 40 --wait-time 450
+python runbot.py --exchange grvt --ticker ADA --quantity 50 --take-profit 0.02 --max-orders 40 --wait-time 30
+
 ```
 
 ### Extended 交易所：
