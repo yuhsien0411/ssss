@@ -120,8 +120,12 @@ class TradingBot:
                     if order_type == "OPEN":
                         self.order_filled_amount = filled_size
                         # Clear open order tracking when filled
-                        if self.current_open_order_id == order_id:
+                        self.logger.log(f"[DEBUG] Checking order_id: WS={order_id}, Tracked={self.current_open_order_id}", "INFO")
+                        if str(self.current_open_order_id) == str(order_id):
+                            self.logger.log(f"[DEBUG] Clearing current_open_order_id", "INFO")
                             self.current_open_order_id = None
+                        else:
+                            self.logger.log(f"[DEBUG] Order ID mismatch! Not clearing.", "WARNING")
                         # Ensure thread-safe interaction with asyncio event loop
                         if self.loop is not None:
                             self.loop.call_soon_threadsafe(self.order_filled_event.set)
@@ -373,7 +377,8 @@ class TradingBot:
                 return False
             else:
                 self.logger.log(f"[OPEN] [{order_id}] Price within grid-step, keeping order active", "INFO")
-                # Keep the order tracked as current open order
+                # Keep the order tracked - it will be handled by WebSocket when it fills
+                # Return True to indicate no immediate action needed
                 return True
 
         return False
