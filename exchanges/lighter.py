@@ -15,6 +15,7 @@ from helpers.logger import TradingLogger
 # Import official Lighter SDK for API client
 import lighter
 from lighter import SignerClient, ApiClient, Configuration
+from lighter.api import OrderApi
 
 # Import custom WebSocket implementation
 from .lighter_custom_websocket import LighterCustomWebSocketManager
@@ -560,10 +561,51 @@ class LighterClient(BaseExchangeClient):
         else:
             raise Exception(f"[CLOSE] Error placing order: {order_result.error_message}")
     
+    async def fetch_order_book_from_api(self, market_id: int, limit: int = 10):
+        """Fetch order book using official Lighter API."""
+        try:
+            order_api = OrderApi(api_client=self.api_client)
+            order_book = await order_api.order_book_orders(market_id=market_id, limit=limit)
+            
+            # Log order book info
+            self.logger.log(f"=== ORDER BOOK API (Top {limit}) ===", "INFO")
+            
+            # Get best bid and ask from API
+            if order_book.bids and len(order_book.bids) > 0:
+                best_bid_api = Decimal(order_book.bids[0].price)
+                self.logger.log(f"API Best Bid: {best_bid_api} (amount: {order_book.bids[0].remaining_base_amount})", "INFO")
+            else:
+                best_bid_api = None
+                
+            if order_book.asks and len(order_book.asks) > 0:
+                best_ask_api = Decimal(order_book.asks[0].price)
+                self.logger.log(f"API Best Ask: {best_ask_api} (amount: {order_book.asks[0].remaining_base_amount})", "INFO")
+            else:
+                best_ask_api = None
+                
+            return best_bid_api, best_ask_api, order_book
+        except Exception as e:
+            self.logger.log(f"Error fetching order book from API: {e}", "ERROR")
+            return None, None, None
+
     async def get_order_price(self, side: str = '') -> Decimal:
         """Get the price of an order with Lighter using official SDK - Conservative pricing."""
-        # Get current market prices
-        best_bid, best_ask = await self.fetch_bbo_prices(self.config.contract_id)
+        # Try to get order book from official API first
+        best_bid_api, best_ask_api, order_book = await self.fetch_order_book_from_api(self.config.contract_id, limit=5)
+        
+        # Get current market prices from WebSocket order book
+        best_bid_ws, best_ask_ws = await self.fetch_bbo_prices(self.config.contract_id)
+        
+        # Use API data if available, otherwise fall back to WebSocket
+        if best_bid_api and best_ask_api:
+            best_bid = best_bid_api
+            best_ask = best_ask_api
+            self.logger.log("Using order book data from API", "INFO")
+        else:
+            best_bid = best_bid_ws
+            best_ask = best_ask_ws
+            self.logger.log("Falling back to WebSocket order book data", "WARNING")
+        
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
             self.logger.log("Invalid bid/ask prices", "ERROR")
             raise ValueError("Invalid bid/ask prices")
@@ -573,8 +615,9 @@ class LighterClient(BaseExchangeClient):
         spread_percent = (spread / best_bid) * 100
         mid_price = (best_bid + best_ask) / 2
         self.logger.log(f"=== MARKET DATA ===", "INFO")
-        self.logger.log(f"Best Bid: {best_bid}", "INFO")
-        self.logger.log(f"Best Ask: {best_ask}", "INFO")
+        self.logger.log(f"Best Bid (WS): {best_bid_ws} | Best Bid (API): {best_bid_api}", "INFO")
+        self.logger.log(f"Best Ask (WS): {best_ask_ws} | Best Ask (API): {best_ask_api}", "INFO")
+        self.logger.log(f"Using - Bid: {best_bid}, Ask: {best_ask}", "INFO")
         self.logger.log(f"Spread: {spread} ({spread_percent:.4f}%)", "INFO")
         self.logger.log(f"Mid Price: {mid_price}", "INFO")
 
