@@ -119,6 +119,9 @@ class TradingBot:
                 if status == 'FILLED':
                     if order_type == "OPEN":
                         self.order_filled_amount = filled_size
+                        # Clear open order tracking when filled
+                        if self.current_open_order_id == order_id:
+                            self.current_open_order_id = None
                         # Ensure thread-safe interaction with asyncio event loop
                         if self.loop is not None:
                             self.loop.call_soon_threadsafe(self.order_filled_event.set)
