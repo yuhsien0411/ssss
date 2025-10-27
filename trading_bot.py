@@ -77,6 +77,7 @@ class TradingBot:
         self.last_open_order_time = 0
         self.last_log_time = 0
         self.current_order_status = None
+        self.current_open_order_id = None  # Track current open order to prevent multiple open orders
         self.order_filled_event = asyncio.Event()
         self.order_canceled_event = asyncio.Event()
         self.shutdown_requested = False
@@ -131,6 +132,9 @@ class TradingBot:
                 elif status == "CANCELED":
                     if order_type == "OPEN":
                         self.order_filled_amount = filled_size
+                        # Clear open order tracking when canceled
+                        if self.current_open_order_id == order_id:
+                            self.current_open_order_id = None
                         if self.loop is not None:
                             self.loop.call_soon_threadsafe(self.order_canceled_event.set)
                         else:
@@ -165,7 +169,7 @@ class TradingBot:
         # Check if we have too many active orders
         if len(self.active_close_orders) >= self.config.max_orders:
             return 1
-        
+
         # Check if we have too much position (more than 10x quantity)
         if hasattr(self, 'current_position') and self.current_position:
             max_position = self.config.quantity * 10  # Limit to 10x quantity
@@ -178,6 +182,11 @@ class TradingBot:
     async def _place_and_monitor_open_order(self) -> bool:
         """Place an order and monitor its execution."""
         try:
+            # Check if there's already an open order
+            if self.current_open_order_id is not None:
+                self.logger.log(f"[OPEN] Skipping - already have open order [{self.current_open_order_id}]", "INFO")
+                return False
+            
             # Reset state before placing order
             self.order_filled_event.clear()
             self.current_order_status = 'OPEN'
@@ -192,6 +201,9 @@ class TradingBot:
 
             if not order_result.success:
                 return False
+            
+            # Track the current open order
+            self.current_open_order_id = order_result.order_id
 
             if order_result.status == 'FILLED':
                 return await self._handle_order_result(order_result)
@@ -242,7 +254,9 @@ class TradingBot:
                 if not close_order_result.success:
                     self.logger.log(f"[CLOSE] Failed to place close order: {close_order_result.error_message}", "ERROR")
                     raise Exception(f"[CLOSE] Failed to place close order: {close_order_result.error_message}")
-
+                
+                # Clear open order tracking
+                self.current_open_order_id = None
                 return True
 
         else:
@@ -261,7 +275,7 @@ class TradingBot:
                         close_price = filled_price * (1 + self.config.take_profit/100)
                     else:
                         close_price = filled_price * (1 - self.config.take_profit/100)
-                    
+
                     close_order_result = await self.exchange_client.place_close_order(
                         self.config.contract_id,
                         self.config.quantity,
@@ -270,11 +284,13 @@ class TradingBot:
                     )
                     if self.config.exchange == "lighter":
                         await asyncio.sleep(1)
-                    
+
                     if not close_order_result.success:
                         self.logger.log(f"[CLOSE] Failed to place close order: {close_order_result.error_message}", "ERROR")
                         raise Exception(f"[CLOSE] Failed to place close order: {close_order_result.error_message}")
                     
+                    # Clear open order tracking
+                    self.current_open_order_id = None
                     return True
                 
                 await asyncio.sleep(0.5)  # Check every 0.5 seconds
@@ -317,12 +333,17 @@ class TradingBot:
                                     close_price,
                                     close_side
                                 )
+                                # Clear open order tracking
+                                self.current_open_order_id = None
                                 return True
                 
+                # Clear open order tracking after cancel
+                self.current_open_order_id = None
                 self.logger.log(f"[OPEN] [{order_id}] Order canceled, will place new order in next cycle", "INFO")
                 return False
             else:
                 self.logger.log(f"[OPEN] [{order_id}] Price within grid-step, keeping order active", "INFO")
+                # Keep the order tracked as current open order
                 return True
 
         return False
@@ -491,11 +512,11 @@ class TradingBot:
                 if not mismatch_detected:
                     # Simplified logic - always try to place orders
                     wait_time = self._calculate_wait_time()
-                    
+
                     if wait_time > 0:
                         await asyncio.sleep(wait_time)
                         continue
-                    
+
                     # Always place new orders if we have capacity
                     if len(self.active_close_orders) < self.config.max_orders:
                         await self._place_and_monitor_open_order()
