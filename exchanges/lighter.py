@@ -568,17 +568,29 @@ class LighterClient(BaseExchangeClient):
             self.logger.log("Invalid bid/ask prices", "ERROR")
             raise ValueError("Invalid bid/ask prices")
 
+        # Print detailed bid/ask information
+        spread = best_ask - best_bid
+        spread_percent = (spread / best_bid) * 100
+        self.logger.log(f"=== MARKET DATA ===", "INFO")
+        self.logger.log(f"Best Bid: {best_bid}", "INFO")
+        self.logger.log(f"Best Ask: {best_ask}", "INFO")
+        self.logger.log(f"Spread: {spread} ({spread_percent:.4f}%)", "INFO")
+        self.logger.log(f"Mid Price: {(best_bid + best_ask) / 2}", "INFO")
+
         # Use conservative pricing to avoid "accidental price" errors
         if side.lower() == 'buy':
             # For buy orders, use best bid (more conservative)
             order_price = best_bid
+            self.logger.log(f"BUY order using best_bid: {order_price}", "INFO")
         else:
             # For sell orders, use best ask (more conservative)
             order_price = best_ask
+            self.logger.log(f"SELL order using best_ask: {order_price}", "INFO")
 
         # Round to tick size
         if hasattr(self, 'config') and hasattr(self.config, 'tick_size'):
             order_price = self.round_to_tick(order_price)
+            self.logger.log(f"After rounding to tick: {order_price}", "INFO")
 
         # Check existing close orders to avoid conflicts
         active_orders = await self.get_active_orders(self.config.contract_id)
@@ -589,7 +601,8 @@ class LighterClient(BaseExchangeClient):
             else:
                 order_price = max(order_price, order.price + self.config.tick_size)
 
-        self.logger.log(f"Price calculation: side={side}, best_bid={best_bid}, best_ask={best_ask}, order_price={order_price}", "DEBUG")
+        self.logger.log(f"Final order price: {order_price}", "INFO")
+        self.logger.log(f"==================", "INFO")
         return order_price
 
     async def cancel_order(self, order_id: str, max_retries: int = 3) -> OrderResult:
