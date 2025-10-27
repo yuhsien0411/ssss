@@ -172,8 +172,8 @@ class TradingBot:
             if abs(self.current_position) > max_position:
                 return 5  # Wait 5 seconds if position is too large
         
-        # Use configured wait_time between orders (from --wait-time parameter)
-        return self.config.wait_time
+        # No wait between orders - wait_time is handled in _handle_order_result
+        return 0
 
     async def _place_and_monitor_open_order(self) -> bool:
         """Place an order and monitor its execution."""
@@ -246,10 +246,84 @@ class TradingBot:
                 return True
 
         else:
-            # Order placed successfully, will be monitored by WebSocket
-            # The order will be handled when it fills via WebSocket callback
-            self.logger.log(f"[OPEN] [{order_id}] Order placed successfully @ {order_result.price}", "INFO")
-            return True
+            # Wait for order to fill or wait_time to expire
+            self.logger.log(f"[OPEN] [{order_id}] Order placed @ {order_result.price}, waiting {self.config.wait_time}s", "INFO")
+            
+            # Wait for wait_time seconds or until order fills
+            start_time = time.time()
+            while time.time() - start_time < self.config.wait_time:
+                # Check if order filled via WebSocket
+                if self.order_filled_event.is_set():
+                    self.logger.log(f"[OPEN] [{order_id}] Order filled during wait period", "INFO")
+                    # Place close order
+                    close_side = self.config.close_order_side
+                    if close_side == 'sell':
+                        close_price = filled_price * (1 + self.config.take_profit/100)
+                    else:
+                        close_price = filled_price * (1 - self.config.take_profit/100)
+                    
+                    close_order_result = await self.exchange_client.place_close_order(
+                        self.config.contract_id,
+                        self.config.quantity,
+                        close_price,
+                        close_side
+                    )
+                    if self.config.exchange == "lighter":
+                        await asyncio.sleep(1)
+                    
+                    if not close_order_result.success:
+                        self.logger.log(f"[CLOSE] Failed to place close order: {close_order_result.error_message}", "ERROR")
+                        raise Exception(f"[CLOSE] Failed to place close order: {close_order_result.error_message}")
+                    
+                    return True
+                
+                await asyncio.sleep(0.5)  # Check every 0.5 seconds
+            
+            # Wait time expired and order not filled
+            self.logger.log(f"[OPEN] [{order_id}] Wait time expired, checking if cancel needed", "INFO")
+            
+            # Get current market price
+            new_order_price = await self.exchange_client.get_order_price(self.config.direction)
+            
+            # Check if price still within grid-step
+            price_diff = abs(new_order_price - order_result.price)
+            grid_step_threshold = order_result.price * (self.config.grid_step / 100)
+            
+            if price_diff > grid_step_threshold:
+                self.logger.log(f"[OPEN] [{order_id}] Price moved beyond grid-step ({price_diff:.5f} > {grid_step_threshold:.5f}), canceling order", "INFO")
+                
+                # Cancel the order
+                cancel_result = await self.exchange_client.cancel_order(order_id)
+                
+                if self.config.exchange == "lighter":
+                    # Wait for cancel confirmation
+                    await asyncio.sleep(1)
+                    # Check if order was filled before cancel
+                    if hasattr(self.exchange_client, 'current_order') and self.exchange_client.current_order:
+                        if self.exchange_client.current_order.status == 'FILLED':
+                            self.logger.log(f"[OPEN] [{order_id}] Order was filled before cancel", "INFO")
+                            self.order_filled_amount = self.exchange_client.current_order.filled_size
+                            # Place close order for filled amount
+                            if self.order_filled_amount > 0:
+                                close_side = self.config.close_order_side
+                                if close_side == 'sell':
+                                    close_price = filled_price * (1 + self.config.take_profit/100)
+                                else:
+                                    close_price = filled_price * (1 - self.config.take_profit/100)
+                                
+                                close_order_result = await self.exchange_client.place_close_order(
+                                    self.config.contract_id,
+                                    self.order_filled_amount,
+                                    close_price,
+                                    close_side
+                                )
+                                return True
+                
+                self.logger.log(f"[OPEN] [{order_id}] Order canceled, will place new order in next cycle", "INFO")
+                return False
+            else:
+                self.logger.log(f"[OPEN] [{order_id}] Price within grid-step, keeping order active", "INFO")
+                return True
 
         return False
 
