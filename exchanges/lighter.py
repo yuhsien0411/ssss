@@ -571,21 +571,29 @@ class LighterClient(BaseExchangeClient):
         # Print detailed bid/ask information
         spread = best_ask - best_bid
         spread_percent = (spread / best_bid) * 100
+        mid_price = (best_bid + best_ask) / 2
         self.logger.log(f"=== MARKET DATA ===", "INFO")
         self.logger.log(f"Best Bid: {best_bid}", "INFO")
         self.logger.log(f"Best Ask: {best_ask}", "INFO")
         self.logger.log(f"Spread: {spread} ({spread_percent:.4f}%)", "INFO")
-        self.logger.log(f"Mid Price: {(best_bid + best_ask) / 2}", "INFO")
+        self.logger.log(f"Mid Price: {mid_price}", "INFO")
 
-        # Use conservative pricing to avoid "accidental price" errors
-        if side.lower() == 'buy':
-            # For buy orders, use best bid (more conservative)
-            order_price = best_bid
-            self.logger.log(f"BUY order using best_bid: {order_price}", "INFO")
+        # Use mid price for more reasonable pricing
+        # If spread is too large (>5%), it indicates order book issue
+        if spread_percent > 5:
+            self.logger.log(f"WARNING: Large spread detected ({spread_percent:.2f}%), using mid price", "WARNING")
+            order_price = mid_price
+            self.logger.log(f"Using mid price for {side} order: {order_price}", "INFO")
         else:
-            # For sell orders, use best ask (more conservative)
-            order_price = best_ask
-            self.logger.log(f"SELL order using best_ask: {order_price}", "INFO")
+            # Normal spread - use conservative pricing
+            if side.lower() == 'buy':
+                # For buy orders, use best bid (more conservative)
+                order_price = best_bid
+                self.logger.log(f"BUY order using best_bid: {order_price}", "INFO")
+            else:
+                # For sell orders, use best ask (more conservative)
+                order_price = best_ask
+                self.logger.log(f"SELL order using best_ask: {order_price}", "INFO")
 
         # Round to tick size
         if hasattr(self, 'config') and hasattr(self.config, 'tick_size'):
