@@ -561,20 +561,20 @@ class LighterClient(BaseExchangeClient):
             raise Exception(f"[CLOSE] Error placing order: {order_result.error_message}")
     
     async def get_order_price(self, side: str = '') -> Decimal:
-        """Get the price of an order with Lighter using official SDK - Improved pricing."""
+        """Get the price of an order with Lighter using official SDK - Conservative pricing."""
         # Get current market prices
         best_bid, best_ask = await self.fetch_bbo_prices(self.config.contract_id)
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
             self.logger.log("Invalid bid/ask prices", "ERROR")
             raise ValueError("Invalid bid/ask prices")
 
-        # Use more aggressive pricing - closer to market price
+        # Use conservative pricing to avoid "accidental price" errors
         if side.lower() == 'buy':
-            # For buy orders, use price slightly below best ask (more likely to fill)
-            order_price = best_ask * Decimal('0.999')  # 0.1% below best ask
+            # For buy orders, use best bid (more conservative)
+            order_price = best_bid
         else:
-            # For sell orders, use price slightly above best bid (more likely to fill)
-            order_price = best_bid * Decimal('1.001')  # 0.1% above best bid
+            # For sell orders, use best ask (more conservative)
+            order_price = best_ask
 
         # Round to tick size
         if hasattr(self, 'config') and hasattr(self.config, 'tick_size'):
