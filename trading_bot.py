@@ -172,8 +172,8 @@ class TradingBot:
             if abs(self.current_position) > max_position:
                 return 5  # Wait 5 seconds if position is too large
         
-        # Minimal wait time for normal cases
-        return 0
+        # Minimum 2 second wait between orders to avoid API rate limits
+        return 2
 
     async def _place_and_monitor_open_order(self) -> bool:
         """Place an order and monitor its execution."""
