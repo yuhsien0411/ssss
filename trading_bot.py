@@ -298,7 +298,34 @@ class TradingBot:
                 
                 await asyncio.sleep(0.5)  # Check every 0.5 seconds
             
-            # Wait time expired and order not filled
+            # Wait time expired - check one more time if order was filled
+            if self.order_filled_event.is_set():
+                self.logger.log(f"[OPEN] [{order_id}] Order filled after wait period expired", "INFO")
+                # Place close order
+                close_side = self.config.close_order_side
+                if close_side == 'sell':
+                    close_price = filled_price * (1 + self.config.take_profit/100)
+                else:
+                    close_price = filled_price * (1 - self.config.take_profit/100)
+                
+                close_order_result = await self.exchange_client.place_close_order(
+                    self.config.contract_id,
+                    self.config.quantity,
+                    close_price,
+                    close_side
+                )
+                if self.config.exchange == "lighter":
+                    await asyncio.sleep(1)
+                
+                if not close_order_result.success:
+                    self.logger.log(f"[CLOSE] Failed to place close order: {close_order_result.error_message}", "ERROR")
+                    raise Exception(f"[CLOSE] Failed to place close order: {close_order_result.error_message}")
+                
+                # Clear open order tracking
+                self.current_open_order_id = None
+                return True
+            
+            # Order not filled - check if cancel needed
             self.logger.log(f"[OPEN] [{order_id}] Wait time expired, checking if cancel needed", "INFO")
             
             # Get current market price
