@@ -60,6 +60,11 @@ class LighterClient(BaseExchangeClient):
         self.orders_cache = {}
         self.current_order_client_id = None
         self.current_order = None
+        
+        # Margin mode tracking
+        self.last_margin_mode_set_time = 0
+        self.margin_mode_recheck_interval = 60  # Re-check every 1 minute (more frequent to ensure it stays set)
+        self.margin_mode_setting_in_progress = False  # Prevent concurrent API calls
 
     def _validate_config(self) -> None:
         """Validate Lighter configuration."""
@@ -388,12 +393,38 @@ class LighterClient(BaseExchangeClient):
             order_id=str(order_params['client_order_index']),
             error_message=f"Order creation failed after {max_retries} attempts: {last_error}")
 
+    async def _ensure_margin_mode(self):
+        """Ensure margin mode is set before placing orders (with interval check)."""
+        margin_mode_env = os.getenv('LIGHTER_MARGIN_MODE', '').lower()
+        if margin_mode_env in ['isolated', 'cross']:
+            current_time = time.time()
+            
+            # Prevent concurrent API calls
+            if self.margin_mode_setting_in_progress:
+                self.logger.log("Margin mode setting already in progress, skipping...", "DEBUG")
+                return
+            
+            # Only re-set if enough time has passed since last set
+            if current_time - self.last_margin_mode_set_time >= self.margin_mode_recheck_interval:
+                self.margin_mode_setting_in_progress = True
+                try:
+                    leverage_env = int(os.getenv('LIGHTER_LEVERAGE', '10'))
+                    self.logger.log(f"🔄 Re-checking margin mode (interval: {self.margin_mode_recheck_interval}s)", "INFO")
+                    success = await self.set_margin_mode(mode=margin_mode_env, leverage=leverage_env)
+                    if success:
+                        self.last_margin_mode_set_time = current_time
+                finally:
+                    self.margin_mode_setting_in_progress = False
+
     async def place_limit_order(self, contract_id: str, quantity: Decimal, price: Decimal,
                                 side: str) -> OrderResult:
         """Place a limit order with Lighter using official SDK."""
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
+
+        # Ensure margin mode is set (re-apply before each order)
+        await self._ensure_margin_mode()
 
         # Determine order side and price
         if side.lower() == 'buy':
@@ -429,6 +460,9 @@ class LighterClient(BaseExchangeClient):
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
+
+        # Ensure margin mode is set (re-apply before each order)
+        await self._ensure_margin_mode()
 
         # Determine order side and price
         if side.lower() == 'buy':
