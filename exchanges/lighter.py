@@ -602,7 +602,7 @@ class LighterClient(BaseExchangeClient):
             )
 
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
-        """Place an open order with Lighter using official SDK."""
+        """Place an open order with Lighter using official SDK (POST-ONLY)."""
 
         self.current_order = None
         self.current_order_client_id = None
@@ -614,7 +614,8 @@ class LighterClient(BaseExchangeClient):
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                order_result = await self.place_limit_order(contract_id, quantity, order_price, direction)
+                # Use POST-ONLY order to ensure maker-only execution
+                order_result = await self.place_post_only_order(contract_id, quantity, order_price, direction)
                 if order_result.success:
                     break
                 elif 'invalid nonce' in str(order_result.error_message).lower() and attempt < max_retries - 1:
@@ -652,10 +653,11 @@ class LighterClient(BaseExchangeClient):
         return active_close_orders
 
     async def place_close_order(self, contract_id: str, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
-        """Place a close order with Lighter using official SDK."""
+        """Place a close order with Lighter using official SDK (POST-ONLY)."""
         self.current_order = None
         self.current_order_client_id = None
-        order_result = await self.place_limit_order(contract_id, quantity, price, side)
+        # Use POST-ONLY order to ensure maker-only execution
+        order_result = await self.place_post_only_order(contract_id, quantity, price, side)
 
         # wait for 5 seconds to ensure order is placed
         await asyncio.sleep(5)
