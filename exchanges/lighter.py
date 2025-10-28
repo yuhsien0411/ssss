@@ -65,6 +65,7 @@ class LighterClient(BaseExchangeClient):
         self.last_margin_mode_set_time = 0
         self.margin_mode_recheck_interval = 60  # Re-check every 1 minute (more frequent to ensure it stays set)
         self.margin_mode_setting_in_progress = False  # Prevent concurrent API calls
+        self.margin_mode_force_before_order = os.getenv('LIGHTER_MARGIN_MODE_FORCE', 'false').lower() == 'true'  # Force reset before every order
 
     def _validate_config(self) -> None:
         """Validate Lighter configuration."""
@@ -393,23 +394,39 @@ class LighterClient(BaseExchangeClient):
             order_id=str(order_params['client_order_index']),
             error_message=f"Order creation failed after {max_retries} attempts: {last_error}")
 
-    async def _ensure_margin_mode(self):
-        """Ensure margin mode is set before placing orders (with interval check)."""
+    async def _ensure_margin_mode(self, force: bool = False):
+        """Ensure margin mode is set before placing orders.
+        
+        Args:
+            force: If True, always reset margin mode regardless of interval
+        """
         margin_mode_env = os.getenv('LIGHTER_MARGIN_MODE', '').lower()
         if margin_mode_env in ['isolated', 'cross']:
             current_time = time.time()
             
             # Prevent concurrent API calls
             if self.margin_mode_setting_in_progress:
-                self.logger.log("Margin mode setting already in progress, skipping...", "DEBUG")
+                self.logger.log("Margin mode setting already in progress, waiting...", "DEBUG")
+                # Wait for ongoing setting to complete
+                max_wait = 5
+                waited = 0
+                while self.margin_mode_setting_in_progress and waited < max_wait:
+                    await asyncio.sleep(0.1)
+                    waited += 0.1
                 return
             
-            # Only re-set if enough time has passed since last set
-            if current_time - self.last_margin_mode_set_time >= self.margin_mode_recheck_interval:
+            # Check if we need to reset
+            should_reset = force or (current_time - self.last_margin_mode_set_time >= self.margin_mode_recheck_interval)
+            
+            if should_reset:
                 self.margin_mode_setting_in_progress = True
                 try:
                     leverage_env = int(os.getenv('LIGHTER_LEVERAGE', '10'))
-                    self.logger.log(f"🔄 Re-checking margin mode (interval: {self.margin_mode_recheck_interval}s)", "INFO")
+                    if force:
+                        self.logger.log(f"🔒 Forcing margin mode to {margin_mode_env.upper()} before order", "INFO")
+                    else:
+                        self.logger.log(f"🔄 Re-checking margin mode (interval: {self.margin_mode_recheck_interval}s)", "INFO")
+                    
                     success = await self.set_margin_mode(mode=margin_mode_env, leverage=leverage_env)
                     if success:
                         self.last_margin_mode_set_time = current_time
@@ -423,8 +440,8 @@ class LighterClient(BaseExchangeClient):
         if self.lighter_client is None:
             await self._initialize_lighter_client()
 
-        # Ensure margin mode is set (re-apply before each order)
-        await self._ensure_margin_mode()
+        # Ensure margin mode is set (force reset if configured)
+        await self._ensure_margin_mode(force=self.margin_mode_force_before_order)
 
         # Determine order side and price
         if side.lower() == 'buy':
@@ -461,8 +478,8 @@ class LighterClient(BaseExchangeClient):
         if self.lighter_client is None:
             await self._initialize_lighter_client()
 
-        # Ensure margin mode is set (re-apply before each order)
-        await self._ensure_margin_mode()
+        # Ensure margin mode is set (force reset if configured)
+        await self._ensure_margin_mode(force=self.margin_mode_force_before_order)
 
         # Determine order side and price
         if side.lower() == 'buy':

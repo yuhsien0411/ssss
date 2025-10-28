@@ -37,6 +37,9 @@ LIGHTER_API_KEY_INDEX=0
 LIGHTER_MARGIN_MODE=isolated
 # Leverage: 槓桿倍數 (e.g., 5, 10, 20). Default: 10
 LIGHTER_LEVERAGE=10
+# Force margin mode reset before EVERY order (true/false). Default: false
+# Set to 'true' if margin mode keeps reverting to cross mode
+LIGHTER_MARGIN_MODE_FORCE=true
 
 # Extended Configuration
 EXTENDED_API_KEY=your_extended_api_key
