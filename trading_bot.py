@@ -451,43 +451,43 @@ class TradingBot:
             print("--------------------------------")
 
     async def _meet_grid_step_condition(self) -> bool:
-        """Check if new order meets grid step requirement."""
-        if not self.active_close_orders:
-            return True
-        
-        # Get the closest close order price
-        picker = min if self.config.direction == "buy" else max
-        next_close_order = picker(self.active_close_orders, key=lambda o: o["price"])
-        next_close_price = next_close_order["price"]
-        
-        # Get current market prices
-        best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
-        if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
-            raise ValueError("No bid/ask data available")
-        
-        # Calculate what the new close order price would be
-        if self.config.direction == "buy":
-            # Buy direction: open at best_bid, close at best_ask
-            new_order_close_price = best_ask * (1 + self.config.take_profit/100)
-            # Check if new close price is far enough from existing close prices
-            if next_close_price / new_order_close_price > 1 + self.config.grid_step/100:
-                self.logger.log(f"[GRID] New close price {new_order_close_price:.5f} vs existing {next_close_price:.5f} - OK", "INFO")
-                return True
+        """Check if new order meets grid step requirement (matches original logic)."""
+        if self.active_close_orders:
+            picker = min if self.config.direction == "buy" else max
+            next_close_order = picker(self.active_close_orders, key=lambda o: o["price"])
+            next_close_price = next_close_order["price"]
+
+            best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+            if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
+                raise ValueError("No bid/ask data available")
+
+            if self.config.direction == "buy":
+                new_order_close_price = best_ask * (1 + self.config.take_profit/100)
+                ratio = next_close_price / new_order_close_price
+                threshold = 1 + self.config.grid_step/100
+                self.logger.log(f"[GRID] BUY: next={next_close_price:.5f} new={new_order_close_price:.5f} ratio={ratio:.5f} threshold={threshold:.5f}", "INFO")
+                if ratio > threshold:
+                    self.logger.log(f"[GRID] ✅ OK - Grid step condition met", "INFO")
+                    return True
+                else:
+                    self.logger.log(f"[GRID] ❌ SKIP - Too close, waiting for price change", "INFO")
+                    return False
+            elif self.config.direction == "sell":
+                new_order_close_price = best_bid * (1 - self.config.take_profit/100)
+                ratio = new_order_close_price / next_close_price
+                threshold = 1 + self.config.grid_step/100
+                self.logger.log(f"[GRID] SELL: next={next_close_price:.5f} new={new_order_close_price:.5f} ratio={ratio:.5f} threshold={threshold:.5f}", "INFO")
+                if ratio > threshold:
+                    self.logger.log(f"[GRID] ✅ OK - Grid step condition met", "INFO")
+                    return True
+                else:
+                    self.logger.log(f"[GRID] ❌ SKIP - Too close, waiting for price change", "INFO")
+                    return False
             else:
-                self.logger.log(f"[GRID] New close price {new_order_close_price:.5f} too close to {next_close_price:.5f} - SKIP", "INFO")
-                return False
-        elif self.config.direction == "sell":
-            # Sell direction: open at best_ask, close at best_bid
-            new_order_close_price = best_bid * (1 - self.config.take_profit/100)
-            # Check if new close price is far enough from existing close prices
-            if new_order_close_price / next_close_price > 1 + self.config.grid_step/100:
-                self.logger.log(f"[GRID] New close price {new_order_close_price:.5f} vs existing {next_close_price:.5f} - OK", "INFO")
-                return True
-            else:
-                self.logger.log(f"[GRID] New close price {new_order_close_price:.5f} too close to {next_close_price:.5f} - SKIP", "INFO")
-                return False
+                raise ValueError(f"Invalid direction: {self.config.direction}")
         else:
-            raise ValueError(f"Invalid direction: {self.config.direction}")
+            self.logger.log(f"[GRID] ✅ First order - no grid step check needed", "INFO")
+            return True
 
     async def _check_price_condition(self) -> bool:
         stop_trading = False
