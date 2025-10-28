@@ -696,29 +696,16 @@ class LighterClient(BaseExchangeClient):
         return OrderResult(success=False, error_message=f"Cancel failed after {max_retries} attempts: {last_error}")
 
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
-        """Get order information from Lighter using official SDK."""
+        """Get order information from Lighter using WebSocket current_order."""
         try:
-            # Use shared API client to get account info
-            account_api = lighter.AccountApi(self.api_client)
-
-            # Get account orders
-            account_data = await account_api.account(by="index", value=str(self.account_index))
-
-            # Look for the specific order in account positions
-            for position in account_data.positions:
-                if position.symbol == self.config.ticker:
-                    position_amt = abs(float(position.position))
-                    if position_amt > 0.001:  # Only include significant positions
-                        return OrderInfo(
-                            order_id=order_id,
-                            side="buy" if float(position.position) > 0 else "sell",
-                            size=Decimal(str(position_amt)),
-                            price=Decimal(str(position.avg_price)),
-                            status="FILLED",  # Positions are filled orders
-                            filled_size=Decimal(str(position_amt)),
-                            remaining_size=Decimal('0')
-                        )
-
+            # Use current_order from WebSocket updates
+            if hasattr(self, 'current_order') and self.current_order:
+                # Check if this is the order we're looking for
+                if str(self.current_order.order_id) == str(order_id):
+                    return self.current_order
+            
+            # If not found in current_order, return None
+            # The order might be too old or not tracked
             return None
 
         except Exception as e:
