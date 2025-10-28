@@ -263,7 +263,8 @@ class LighterClient(BaseExchangeClient):
                     status=status,
                     filled_size=filled_size,
                     remaining_size=remaining_size,
-                    cancel_reason=''
+                    cancel_reason='',
+                    client_order_index=order_data['client_order_index']
                 )
                 self.current_order = current_order
 
@@ -702,13 +703,18 @@ class LighterClient(BaseExchangeClient):
             
             # Use current_order from WebSocket updates
             if hasattr(self, 'current_order') and self.current_order:
-                self.logger.log(f"[API] current_order exists: order_id={self.current_order.order_id}, status={self.current_order.status}", "INFO")
-                # Check if this is the order we're looking for
-                if str(self.current_order.order_id) == str(order_id):
-                    self.logger.log(f"[API] Order ID match! Returning current_order", "INFO")
+                self.logger.log(f"[API] current_order exists: order_id={self.current_order.order_id}, client_order_index={self.current_order.client_order_index}, status={self.current_order.status}", "INFO")
+                
+                # Check if this is the order we're looking for (match by client_order_index)
+                if self.current_order.client_order_index and str(self.current_order.client_order_index) == str(order_id):
+                    self.logger.log(f"[API] client_order_index match! Returning current_order", "INFO")
+                    return self.current_order
+                # Fallback: also check order_id (long ID)
+                elif str(self.current_order.order_id) == str(order_id):
+                    self.logger.log(f"[API] order_id match! Returning current_order", "INFO")
                     return self.current_order
                 else:
-                    self.logger.log(f"[API] Order ID mismatch: current={self.current_order.order_id} vs requested={order_id}", "WARNING")
+                    self.logger.log(f"[API] No match: current client_order_index={self.current_order.client_order_index}, order_id={self.current_order.order_id} vs requested={order_id}", "WARNING")
             else:
                 self.logger.log(f"[API] current_order is None or doesn't exist", "WARNING")
             

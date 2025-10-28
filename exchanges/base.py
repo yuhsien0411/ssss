@@ -56,6 +56,7 @@ class OrderInfo:
     filled_size: Decimal = 0.0
     remaining_size: Decimal = 0.0
     cancel_reason: str = ''
+    client_order_index: Optional[int] = None  # For Lighter exchange
 
 
 class BaseExchangeClient(ABC):
