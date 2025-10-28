@@ -1,4 +1,4 @@
-﻿"""
+"""
 Modular Trading Bot - Supports multiple exchanges
 """
 
@@ -405,7 +405,7 @@ class TradingBot:
                 if stop_trading:
                     msg = f"\n\nWARNING: [{self.config.exchange.upper()}_{self.config.ticker.upper()}] \n"
                     msg += "Stopped trading due to stop price triggered\n"
-                    msg += "隞瑟撌脩?颲曉?迫鈭斗?隞瑟嚗??砍??迫鈭斗?\n"
+                    msg += "价格已经达到停止交易价格，脚本将停止交易\n"
                     await self.send_notification(msg.lstrip())
                     await self.graceful_shutdown(msg)
                     continue
