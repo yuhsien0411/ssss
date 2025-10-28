@@ -474,6 +474,8 @@ class TradingBot:
                     return False
             elif self.config.direction == "sell":
                 new_order_close_price = best_bid * (1 - self.config.take_profit/100)
+                # For SELL: as price goes UP, close prices also go UP
+                # We want: new_order_close_price / next_close_price > 1 + grid_step
                 ratio = new_order_close_price / next_close_price
                 threshold = 1 + self.config.grid_step/100
                 self.logger.log(f"[GRID] SELL: next={next_close_price:.5f} new={new_order_close_price:.5f} ratio={ratio:.5f} threshold={threshold:.5f}", "INFO")
