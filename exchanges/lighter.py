@@ -698,18 +698,27 @@ class LighterClient(BaseExchangeClient):
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
         """Get order information from Lighter using WebSocket current_order."""
         try:
+            self.logger.log(f"[API] get_order_info called for order_id={order_id}", "INFO")
+            
             # Use current_order from WebSocket updates
             if hasattr(self, 'current_order') and self.current_order:
+                self.logger.log(f"[API] current_order exists: order_id={self.current_order.order_id}, status={self.current_order.status}", "INFO")
                 # Check if this is the order we're looking for
                 if str(self.current_order.order_id) == str(order_id):
+                    self.logger.log(f"[API] Order ID match! Returning current_order", "INFO")
                     return self.current_order
+                else:
+                    self.logger.log(f"[API] Order ID mismatch: current={self.current_order.order_id} vs requested={order_id}", "WARNING")
+            else:
+                self.logger.log(f"[API] current_order is None or doesn't exist", "WARNING")
             
             # If not found in current_order, return None
             # The order might be too old or not tracked
+            self.logger.log(f"[API] Order not found in current_order, returning None", "WARNING")
             return None
 
         except Exception as e:
-            self.logger.log(f"Error getting order info: {e}", "ERROR")
+            self.logger.log(f"[API] Error getting order info: {e}", "ERROR")
             return None
 
     @query_retry(reraise=True)

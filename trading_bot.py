@@ -208,24 +208,37 @@ class TradingBot:
                 
                 # Get current order status
                 if self.config.exchange == "lighter":
+                    self.logger.log(f"[API] Checking current_order from WebSocket", "INFO")
                     current_order = self.exchange_client.current_order
-                    if current_order and current_order.order_id == order_id:
+                    if current_order:
+                        self.logger.log(f"[API] current_order found: order_id={current_order.order_id}, status={current_order.status}, filled={current_order.filled_size}", "INFO")
+                    else:
+                        self.logger.log(f"[API] current_order is None", "INFO")
+                    
+                    if current_order and str(current_order.order_id) == str(order_id):
                         current_status = current_order.status
                         filled_size = current_order.filled_size
+                        self.logger.log(f"[API] Using current_order data: status={current_status}, filled={filled_size}", "INFO")
                     else:
                         # Fallback: query order info
+                        self.logger.log(f"[API] Calling get_order_info({order_id})", "INFO")
                         order_info = await self.exchange_client.get_order_info(order_id)
                         if order_info:
                             current_status = order_info.status
                             filled_size = order_info.filled_size
+                            self.logger.log(f"[API] get_order_info returned: status={current_status}, filled={filled_size}", "INFO")
                         else:
+                            self.logger.log(f"[API] get_order_info returned None, skipping this poll", "WARNING")
                             continue
                 else:
+                    self.logger.log(f"[API] Calling get_order_info({order_id})", "INFO")
                     order_info = await self.exchange_client.get_order_info(order_id)
                     if order_info:
                         current_status = order_info.status
                         filled_size = order_info.filled_size
+                        self.logger.log(f"[API] get_order_info returned: status={current_status}, filled={filled_size}", "INFO")
                     else:
+                        self.logger.log(f"[API] get_order_info returned None, skipping this poll", "WARNING")
                         continue
                 
                 self.logger.log(f"[OPEN] [{order_id}] Poll {poll_count + 1}/{max_polls}: status={current_status}, filled={filled_size}", "INFO")
