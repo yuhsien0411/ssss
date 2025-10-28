@@ -193,14 +193,55 @@ class TradingBot:
             if not order_result.success:
                 return False
 
-            if order_result.status == 'FILLED':
-                return await self._handle_order_result(order_result)
-            elif not self.order_filled_event.is_set():
-                try:
-                    await asyncio.wait_for(self.order_filled_event.wait(), timeout=10)
-                except asyncio.TimeoutError:
-                    pass
+            order_id = order_result.order_id
 
+            # Check if immediately filled
+            if order_result.status == 'FILLED':
+                self.logger.log(f"[OPEN] [{order_id}] Order filled immediately", "INFO")
+                return await self._handle_order_result(order_result)
+
+            # Poll order status every 1 second for up to 10 seconds
+            self.logger.log(f"[OPEN] [{order_id}] Polling order status every 1s for 10s", "INFO")
+            max_polls = 10
+            for poll_count in range(max_polls):
+                await asyncio.sleep(1)
+                
+                # Get current order status
+                if self.config.exchange == "lighter":
+                    current_order = self.exchange_client.current_order
+                    if current_order and current_order.order_id == order_id:
+                        current_status = current_order.status
+                        filled_size = current_order.filled_size
+                    else:
+                        # Fallback: query order info
+                        order_info = await self.exchange_client.get_order_info(order_id)
+                        if order_info:
+                            current_status = order_info.status
+                            filled_size = order_info.filled_size
+                        else:
+                            continue
+                else:
+                    order_info = await self.exchange_client.get_order_info(order_id)
+                    if order_info:
+                        current_status = order_info.status
+                        filled_size = order_info.filled_size
+                    else:
+                        continue
+                
+                self.logger.log(f"[OPEN] [{order_id}] Poll {poll_count + 1}/{max_polls}: status={current_status}, filled={filled_size}", "INFO")
+                
+                # Check if filled
+                if current_status == 'FILLED':
+                    self.logger.log(f"[OPEN] [{order_id}] Order filled after {poll_count + 1}s", "INFO")
+                    self.order_filled_amount = filled_size
+                    self.order_filled_event.set()
+                    # Update order_result status
+                    order_result.status = 'FILLED'
+                    break
+                elif current_status in ['CANCELED', 'REJECTED']:
+                    self.logger.log(f"[OPEN] [{order_id}] Order {current_status}", "WARNING")
+                    break
+            
             # Handle order result
             return await self._handle_order_result(order_result)
 
