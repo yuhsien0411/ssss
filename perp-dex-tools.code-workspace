@@ -1,15 +1,19 @@
 {
 	"folders": [
 		{
+			"name": "perp-dex-tools",
 			"path": "."
 		},
 		{
+			"name": "lighter-python-main",
 			"path": "C:/Users/Xian/Downloads/lighter-python-main/lighter-python-main"
 		},
 		{
+			"name": "grvt-pysdk-main",
 			"path": "C:/Users/Xian/Downloads/grvt-pysdk-main (1)/grvt-pysdk-main"
 		},
 		{
+			"name": "perp-dex-tools-main",
 			"path": "C:/Users/Xian/Downloads/perp-dex-tools-main (3)/perp-dex-tools-main"
 		}
 	],

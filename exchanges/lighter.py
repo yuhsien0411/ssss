@@ -149,6 +149,58 @@ class LighterClient(BaseExchangeClient):
                 raise
         return self.lighter_client
 
+    async def set_margin_mode(self, mode: str = "isolated", leverage: int = 10) -> bool:
+        """Set margin mode and leverage for the current market.
+        
+        Args:
+            mode: "isolated" for逐倉模式 or "cross" for 全倉模式
+            leverage: Leverage multiplier (default: 10)
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Import SignerClient constants
+            from lighter import SignerClient
+            
+            # Determine margin mode
+            if mode.lower() == "isolated":
+                margin_mode = SignerClient.ISOLATED_MARGIN_MODE  # 1
+                mode_str = "ISOLATED (逐倉)"
+            elif mode.lower() == "cross":
+                margin_mode = SignerClient.CROSS_MARGIN_MODE  # 0
+                mode_str = "CROSS (全倉)"
+            else:
+                self.logger.log(f"Invalid margin mode: {mode}. Use 'isolated' or 'cross'.", "ERROR")
+                return False
+            
+            # Get market index
+            market_index = int(self.config.contract_id)
+            
+            self.logger.log(f"Setting margin mode to {mode_str} with {leverage}x leverage for market {market_index}...", "INFO")
+            
+            # Call update_leverage API
+            tx_info, resp, error = await self.lighter_client.update_leverage(
+                market_index=market_index,
+                margin_mode=margin_mode,
+                leverage=leverage
+            )
+            
+            if error:
+                self.logger.log(f"Failed to set margin mode: {error}", "ERROR")
+                return False
+            
+            if resp and resp.code == 200:
+                self.logger.log(f"✅ Margin mode set to {mode_str} with {leverage}x leverage successfully!", "INFO")
+                return True
+            else:
+                self.logger.log(f"Failed to set margin mode. Response: {resp}", "ERROR")
+                return False
+                
+        except Exception as e:
+            self.logger.log(f"Error setting margin mode: {e}", "ERROR")
+            return False
+
     async def connect(self) -> None:
         """Connect to Lighter."""
         try:
@@ -162,6 +214,12 @@ class LighterClient(BaseExchangeClient):
             self.config.market_index = self.config.contract_id
             self.config.account_index = self.account_index
             self.config.lighter_client = self.lighter_client
+
+            # Set margin mode to ISOLATED (逐倉) by default if environment variable is set
+            margin_mode_env = os.getenv('LIGHTER_MARGIN_MODE', '').lower()
+            if margin_mode_env in ['isolated', 'cross']:
+                leverage_env = int(os.getenv('LIGHTER_LEVERAGE', '10'))
+                await self.set_margin_mode(mode=margin_mode_env, leverage=leverage_env)
 
             # Initialize WebSocket manager (using custom implementation)
             self.ws_manager = LighterCustomWebSocketManager(

@@ -46,6 +46,8 @@ Examples:
                         help='Ticker symbol (default: BTC)')
     parser.add_argument('--size', type=str, required=True,
                         help='Number of tokens to buy/sell per order')
+    parser.add_argument('--max-position', type=str,
+                        help='Maximum position size for pyramid strategy (GRVT only, default: size * 5)')
     parser.add_argument('--iter', type=int, required=True,
                         help='Number of iterations to run')
     parser.add_argument('--fill-timeout', type=int, default=5,
@@ -109,16 +111,28 @@ async def main():
     
     print(f"Starting hedge mode for {args.exchange} exchange...")
     print(f"Ticker: {args.ticker}, Size: {args.size}, Iterations: {args.iter}")
+    if args.max_position and args.exchange.lower() == 'grvt':
+        print(f"Max Position: {args.max_position} (Pyramid Strategy)")
     print("-" * 50)
     
     try:
         # Create the hedge bot instance
-        bot = HedgeBotClass(
-            ticker=args.ticker.upper(),
-            order_quantity=Decimal(args.size),
-            fill_timeout=args.fill_timeout,
-            iterations=args.iter
-        )
+        # GRVT supports max_position parameter for pyramid strategy
+        if args.exchange.lower() == 'grvt' and args.max_position:
+            bot = HedgeBotClass(
+                ticker=args.ticker.upper(),
+                order_quantity=Decimal(args.size),
+                fill_timeout=args.fill_timeout,
+                iterations=args.iter,
+                max_position=Decimal(args.max_position)
+            )
+        else:
+            bot = HedgeBotClass(
+                ticker=args.ticker.upper(),
+                order_quantity=Decimal(args.size),
+                fill_timeout=args.fill_timeout,
+                iterations=args.iter
+            )
         
         # Run the bot
         await bot.run()

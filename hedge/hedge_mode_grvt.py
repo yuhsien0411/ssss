@@ -35,7 +35,7 @@ class Config:
 class HedgeBot:
     """Trading bot that places post-only orders on GRVT and hedges with market orders on Lighter."""
 
-    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 30, iterations: int = 20):
+    def __init__(self, ticker: str, order_quantity: Decimal, fill_timeout: int = 30, iterations: int = 20, max_position: Decimal = None):
         self.ticker = ticker
         self.order_quantity = order_quantity
         self.fill_timeout = fill_timeout
@@ -44,6 +44,22 @@ class HedgeBot:
         self.grvt_position = Decimal('0')
         self.lighter_position = Decimal('0')
         self.current_order = {}
+        
+        # 金字塔式持倉策略參數
+        self.max_position = max_position if max_position else order_quantity * 5  # 預設最大持倉為單次下單量的5倍
+        self.current_phase = 'building'  # 'building' (建倉) 或 'closing' (平倉)
+        self.target_position = Decimal('0')  # 當前目標持倉
+        
+        # WebSocket 狀態管理
+        self.grvt_ws_connected = False
+        self.lighter_ws_connected = False
+        self.grvt_ws_last_message_time = 0
+        self.lighter_ws_last_message_time = 0
+        
+        # 訂單狀態緩存（減少 API 呼叫）
+        self.grvt_order_cache = {}  # order_id -> order_info
+        self.last_api_query_time = 0
+        self.api_query_interval = 5  # 最少 5 秒才能查詢一次 API
         
         # Initialize logging to file
         os.makedirs("logs", exist_ok=True)
@@ -819,37 +835,99 @@ class HedgeBot:
             self.logger.error(f"Error placing GRVT order: {e}")
             raise
 
+    async def check_order_filled_from_cache(self, order_id: str) -> bool:
+        """檢查訂單是否已成交（從緩存）- 避免 API 呼叫"""
+        if order_id in self.grvt_order_cache:
+            cached_order = self.grvt_order_cache[order_id]
+            if cached_order['status'] == 'FILLED':
+                self.logger.info(f"✅ Order {order_id} filled (from cache)")
+                return True
+        return False
+
+    async def wait_for_grvt_order_with_ws(self, order_id: str, side: str, quantity: Decimal, wait_duration: int) -> bool:
+        """等待 GRVT 訂單成交，優先使用 WebSocket，必要時才查詢 API"""
+        start_time = time.time()
+        check_interval = 1  # 每秒檢查一次
+        last_ws_check_time = self.grvt_ws_last_message_time
+        
+        for i in range(wait_duration):
+            # 1. 優先檢查緩存（WebSocket 更新）
+            if await self.check_order_filled_from_cache(order_id):
+                return True
+            
+            # 2. 檢查 WebSocket 是否活躍
+            if self.grvt_ws_connected:
+                if time.time() - self.grvt_ws_last_message_time < 30:  # 30秒內有消息
+                    # WebSocket 正常，繼續等待
+                    if i % 5 == 0:
+                        self.logger.info(f"⏰ Waiting for WS update... {i+1}/{wait_duration}s (WS active)")
+                else:
+                    self.logger.warning(f"⚠️ WebSocket seems inactive (no message for {time.time() - self.grvt_ws_last_message_time:.1f}s)")
+                    self.grvt_ws_connected = False
+            else:
+                # WebSocket 斷線，只在間隔時間後才查詢 API
+                current_time = time.time()
+                if current_time - self.last_api_query_time >= self.api_query_interval:
+                    self.logger.warning(f"⚠️ WebSocket disconnected, querying API (last query: {current_time - self.last_api_query_time:.1f}s ago)")
+                    try:
+                        position_after = await self.get_grvt_actual_position()
+                        self.last_api_query_time = current_time
+                        
+                        # 檢查持倉變化
+                        position_change = abs(position_after - self.grvt_position)
+                        if position_change >= Decimal('0.001'):
+                            self.logger.info(f"✅ Order detected as filled via API position check")
+                            return True
+                    except Exception as e:
+                        self.logger.error(f"❌ Error querying GRVT position: {e}")
+                else:
+                    if i % 5 == 0:
+                        self.logger.info(f"⏰ Waiting... {i+1}/{wait_duration}s (WS down, API cooldown)")
+            
+            await asyncio.sleep(check_interval)
+            
+            if self.stop_flag:
+                return False
+        
+        return False
+
     async def place_grvt_post_only_order(self, side: str, quantity: Decimal):
-        """Place a post-only order on GRVT using position change detection."""
+        """Place a post-only order on GRVT with optimized monitoring."""
         if not self.grvt_client:
             raise Exception("GRVT client not initialized")
 
         self.logger.info(f"[OPEN] [GRVT] [{side}] Placing GRVT POST-ONLY order")
         
-        # 重試機制：最多重試 3 次
-        max_retries = 3
+        # 重試機制：最多重試 2 次（減少重試次數）
+        max_retries = 2
         retry_count = 0
         
         while retry_count < max_retries and not self.stop_flag:
             try:
-                # 記錄下單前持倉
-                position_before = await self.get_grvt_actual_position()
+                # 記錄下單前持倉（只記錄，不查詢 API）
+                position_before = self.grvt_position
                 self.logger.info(f"📊 Position before order: {position_before}")
                 
                 # 下單
                 order_id, order_price = await self.place_bbo_order(side, quantity)
                 self.logger.info(f"📝 GRVT order placed: {order_id} @ {order_price}")
                 
-                # 等待一段時間讓訂單有機會成交
+                # 初始化訂單緩存
+                self.grvt_order_cache[order_id] = {
+                    'status': 'OPEN',
+                    'filled_size': Decimal('0'),
+                    'side': side,
+                    'price': order_price,
+                    'update_time': time.time()
+                }
+                
+                # 等待訂單成交（優先使用 WebSocket）
                 wait_duration = self.fill_timeout
                 self.logger.info(f"⏳ Waiting {wait_duration}s for order to fill...")
                 self.logger.info(f"🎯 Order Details: {side.upper()} {quantity} @ {order_price}")
                 
-                # 分段等待並顯示進度
-                for i in range(wait_duration):
-                    await asyncio.sleep(1)
-                    if i % 5 == 0:  # 每5秒顯示一次進度
-                        self.logger.info(f"⏰ Waiting... {i+1}/{wait_duration}s elapsed")
+                # 使用優化的等待函數
+                order_filled = await self.wait_for_grvt_order_with_ws(order_id, side, quantity, wait_duration)
                 
                 # 撤銷所有掛單（無論是否成交）
                 self.logger.info(f"🗑️ Canceling all open orders...")
@@ -857,26 +935,29 @@ class HedgeBot:
                     cancel_result = await self.grvt_client.cancel_all_orders()
                     if cancel_result.get("success", False):
                         self.logger.info(f"✅ All orders canceled successfully")
-                    else:
-                        self.logger.warning(f"⚠️ Cancel all orders returned: {cancel_result.get('error_message', 'Unknown error')}")
                 except Exception as e:
                     self.logger.warning(f"⚠️ Error canceling orders: {e}")
                 
-                # 查詢下單後持倉
-                await asyncio.sleep(1)  # 等待 1 秒讓持倉更新
-                position_after = await self.get_grvt_actual_position()
+                # 等待一小段時間讓持倉更新
+                await asyncio.sleep(1)
+                
+                # 檢查是否成交（如果 WebSocket 已確認，跳過 API 查詢）
+                if order_filled:
+                    filled_size = quantity  # WebSocket 已確認成交
+                    position_after = position_before + (quantity if side.lower() == 'buy' else -quantity)
+                else:
+                    # WebSocket 未確認，查詢 API 確認
+                    self.logger.info(f"❓ WebSocket did not confirm fill, checking API...")
+                    position_after = await self.get_grvt_actual_position()
+                    position_change = position_after - position_before
+                    filled_size = abs(position_change)
+                    order_filled = filled_size >= Decimal('0.001')
+                
                 self.logger.info(f"📊 Position after order: {position_after}")
                 
-                # 計算持倉變化
-                position_change = position_after - position_before
-                self.logger.info(f"📊 Position change: {position_change}")
-                self.logger.info(f"📊 Position change abs: {abs(position_change)}")
-                self.logger.info(f"📊 Threshold: {Decimal('0.001')}")
-                
-                # 如果持倉有變化，表示訂單已成交
-                if abs(position_change) >= Decimal('0.001'):  # 允許小誤差
-                    filled_size = abs(position_change)
-                    self.logger.info(f"✅ Order filled: {filled_size} (detected by position change)")
+                # 如果訂單已成交
+                if order_filled:
+                    self.logger.info(f"✅ Order filled: {filled_size}")
                     
                     # 更新內部持倉
                     self.grvt_position = position_after
@@ -885,21 +966,11 @@ class HedgeBot:
                     # 立即執行 Lighter 對沖訂單
                     lighter_side = 'sell' if side.lower() == 'buy' else 'buy'
                     self.logger.info(f"🎯 GRVT order filled! Placing Lighter {lighter_side} order...")
-                    self.logger.info(f"🔍 GRVT side: {side}, Lighter side: {lighter_side}, Quantity: {filled_size}")
-                    self.logger.info(f"🔍 Current GRVT position: {self.grvt_position}, Lighter position: {self.lighter_position}")
-                    
-                    # 判斷是開倉還是平倉
-                    if side.lower() == 'buy':
-                        self.logger.info(f"📈 GRVT BUY order filled - Opening Long position, Lighter should SELL to hedge")
-                    else:
-                        self.logger.info(f"📉 GRVT SELL order filled - Closing Long position, Lighter should BUY to hedge")
                     
                     # 下 Lighter 市價訂單對沖
                     try:
-                        # Ensure Lighter client is initialized
                         await self.initialize_lighter_client()
                         
-                        # Use the proper Lighter client market order method
                         lighter_result = await self.lighter_client.place_market_order(
                             contract_id=str(self.lighter_market_index),
                             quantity=filled_size,
@@ -911,9 +982,9 @@ class HedgeBot:
                             
                             # 更新內部 Lighter 持倉狀態
                             if lighter_side.lower() == 'sell':
-                                self.lighter_position -= filled_size  # 賣單減少持倉
+                                self.lighter_position -= filled_size
                             else:
-                                self.lighter_position += filled_size  # 買單增加持倉
+                                self.lighter_position += filled_size
                             
                             self.logger.info(f"📊 Lighter position after hedge: {self.lighter_position}")
                         else:
@@ -927,8 +998,7 @@ class HedgeBot:
                     self.order_execution_complete = True
                     return  # 成功成交，退出函數
                 else:
-                    self.logger.warning(f"⚠️ No position change detected, order likely not filled")
-                    self.logger.warning(f"⚠️ Position change {position_change} is less than threshold {Decimal('0.001')}")
+                    self.logger.warning(f"⚠️ Order not filled after {wait_duration}s")
                     retry_count += 1
                     if retry_count < max_retries:
                         self.logger.warning(f"⚠️ Retrying ({retry_count}/{max_retries})...")
@@ -1031,6 +1101,65 @@ class HedgeBot:
             self.last_snapshot_time = current_time
             await self.take_position_snapshot()
 
+    def get_next_action(self) -> tuple[str, Decimal]:
+        """決定下一步動作：建倉或平倉
+        
+        Returns:
+            tuple: (action, quantity) where action is 'buy' or 'sell'
+        """
+        current_position = abs(self.grvt_position)
+        
+        self.logger.info("=" * 80)
+        self.logger.info("🎯 STRATEGY DECISION")
+        self.logger.info("=" * 80)
+        self.logger.info(f"📊 Current Position: {self.grvt_position:.4f}")
+        self.logger.info(f"📊 Max Position: {self.max_position:.4f}")
+        self.logger.info(f"📊 Current Phase: {self.current_phase.upper()}")
+        self.logger.info(f"📊 Order Quantity: {self.order_quantity:.4f}")
+        
+        if self.current_phase == 'building':
+            # 建倉階段：持續做多直到達到最大持倉
+            if current_position < self.max_position:
+                # 計算還可以建倉多少
+                remaining_capacity = self.max_position - current_position
+                quantity = min(self.order_quantity, remaining_capacity)
+                
+                self.logger.info(f"🔼 BUILDING Phase: BUY {quantity:.4f}")
+                self.logger.info(f"   Progress: {current_position:.4f}/{self.max_position:.4f} ({(current_position/self.max_position*100):.1f}%)")
+                
+                # 如果這筆交易會達到最大持倉，切換到平倉階段
+                if current_position + quantity >= self.max_position - Decimal('0.001'):
+                    self.logger.info(f"✅ Will reach MAX position after this trade, next phase: CLOSING")
+                
+                return 'buy', quantity
+            else:
+                # 達到最大持倉，切換到平倉階段
+                self.current_phase = 'closing'
+                self.logger.info(f"🔄 Switching to CLOSING phase")
+                self.logger.info(f"🔽 CLOSING Phase: SELL {self.order_quantity:.4f}")
+                return 'sell', self.order_quantity
+                
+        else:  # closing phase
+            # 平倉階段：持續做空直到持倉歸零
+            if current_position > Decimal('0.001'):
+                # 計算還需要平倉多少
+                quantity = min(self.order_quantity, current_position)
+                
+                self.logger.info(f"🔽 CLOSING Phase: SELL {quantity:.4f}")
+                self.logger.info(f"   Progress: {current_position:.4f} remaining ({(current_position/self.max_position*100):.1f}%)")
+                
+                # 如果這筆交易會將持倉歸零，切換到建倉階段
+                if current_position - quantity <= Decimal('0.001'):
+                    self.logger.info(f"✅ Will reach ZERO position after this trade, next phase: BUILDING")
+                
+                return 'sell', quantity
+            else:
+                # 持倉歸零，切換到建倉階段
+                self.current_phase = 'building'
+                self.logger.info(f"🔄 Switching to BUILDING phase")
+                self.logger.info(f"🔼 BUILDING Phase: BUY {self.order_quantity:.4f}")
+                return 'buy', self.order_quantity
+
     def print_position_summary(self):
         """打印持倉摘要"""
         if not self.position_snapshots:
@@ -1047,6 +1176,8 @@ class HedgeBot:
         self.logger.info(f"⚖️ Position Diff: {latest['position_diff']:.4f}")
         self.logger.info(f"🎯 Hedge Ratio: {latest['hedge_ratio']:.4f}")
         self.logger.info(f"✅ Fully Hedged: {latest['is_hedged']}")
+        self.logger.info(f"🏗️ Current Phase: {self.current_phase.upper()}")
+        self.logger.info(f"📊 Max Position: {self.max_position:.4f}")
         self.logger.info("=" * 60)
         
         # 顯示最近5個快照的趨勢
@@ -1253,13 +1384,59 @@ class HedgeBot:
             import traceback
             self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
 
+    async def monitor_grvt_websocket(self):
+        """監控 GRVT WebSocket 連接狀態並自動重連"""
+        reconnect_interval = 60  # 60秒檢查一次
+        max_reconnect_attempts = 5
+        
+        while not self.stop_flag:
+            await asyncio.sleep(reconnect_interval)
+            
+            if self.stop_flag:
+                break
+            
+            # 檢查 WebSocket 是否活躍
+            if self.grvt_ws_connected:
+                time_since_last_message = time.time() - self.grvt_ws_last_message_time
+                if time_since_last_message > 120:  # 2分鐘沒有消息
+                    self.logger.warning(f"⚠️ GRVT WebSocket seems dead ({time_since_last_message:.0f}s since last message), attempting reconnect...")
+                    self.grvt_ws_connected = False
+                    
+                    # 嘗試重連
+                    for attempt in range(max_reconnect_attempts):
+                        try:
+                            self.logger.info(f"🔄 Reconnecting GRVT WebSocket (attempt {attempt+1}/{max_reconnect_attempts})...")
+                            await self.grvt_client.disconnect()
+                            await asyncio.sleep(2)
+                            await self.setup_grvt_websocket()
+                            self.logger.info("✅ GRVT WebSocket reconnected successfully")
+                            break
+                        except Exception as e:
+                            self.logger.error(f"❌ Reconnect attempt {attempt+1} failed: {e}")
+                            if attempt < max_reconnect_attempts - 1:
+                                await asyncio.sleep(5)
+                            else:
+                                self.logger.error("❌ All reconnect attempts failed, falling back to REST API")
+            else:
+                # WebSocket 已經斷線，嘗試重連
+                self.logger.info("🔄 GRVT WebSocket is down, attempting to reconnect...")
+                try:
+                    await self.setup_grvt_websocket()
+                    self.logger.info("✅ GRVT WebSocket reconnected")
+                except Exception as e:
+                    self.logger.error(f"❌ Failed to reconnect GRVT WebSocket: {e}")
+
     async def setup_grvt_websocket(self):
-        """Setup GRVT websocket for order updates and order book data."""
+        """Setup GRVT websocket for order updates with auto-reconnect."""
         if not self.grvt_client:
             raise Exception("GRVT client not initialized")
 
         def order_update_handler(order_data):
             """Handle order updates from GRVT WebSocket."""
+            # 更新 WebSocket 活躍狀態
+            self.grvt_ws_last_message_time = time.time()
+            self.grvt_ws_connected = True
+            
             if order_data.get('contract_id') != self.grvt_contract_id:
                 return
             try:
@@ -1269,6 +1446,15 @@ class HedgeBot:
                 filled_size = Decimal(order_data.get('filled_size', '0'))
                 size = Decimal(order_data.get('size', '0'))
                 price = order_data.get('price', '0')
+
+                # 更新訂單緩存
+                self.grvt_order_cache[order_id] = {
+                    'status': status,
+                    'filled_size': filled_size,
+                    'side': side,
+                    'price': price,
+                    'update_time': time.time()
+                }
 
                 if side == 'buy':
                     order_type = "OPEN"
@@ -1321,11 +1507,13 @@ class HedgeBot:
 
             # Connect to GRVT WebSocket
             await self.grvt_client.connect()
+            self.grvt_ws_connected = True
+            self.grvt_ws_last_message_time = time.time()
             self.logger.info("✅ GRVT WebSocket connection established")
-
 
         except Exception as e:
             self.logger.error(f"Could not setup GRVT WebSocket handlers: {e}")
+            self.grvt_ws_connected = False
 
 
     async def trading_loop(self):
@@ -1348,13 +1536,25 @@ class HedgeBot:
             self.logger.error(f"❌ Failed to initialize: {e}")
             return
 
-        # Setup GRVT WebSocket for order updates
-        try:
-            await self.setup_grvt_websocket()
-            self.logger.info("✅ GRVT WebSocket connection established")
-        except Exception as e:
-            self.logger.error(f"❌ Failed to setup GRVT websocket: {e}")
-            self.logger.info("⚠️ Falling back to REST API only for GRVT order status")
+        # Setup GRVT WebSocket for order updates with retry
+        grvt_ws_attempts = 0
+        max_ws_attempts = 3
+        while grvt_ws_attempts < max_ws_attempts:
+            try:
+                await self.setup_grvt_websocket()
+                self.logger.info("✅ GRVT WebSocket connection established")
+                break
+            except Exception as e:
+                grvt_ws_attempts += 1
+                self.logger.error(f"❌ Failed to setup GRVT websocket (attempt {grvt_ws_attempts}/{max_ws_attempts}): {e}")
+                if grvt_ws_attempts < max_ws_attempts:
+                    self.logger.info(f"⏳ Retrying in 3 seconds...")
+                    await asyncio.sleep(3)
+                else:
+                    self.logger.warning("⚠️ GRVT WebSocket setup failed, will use REST API fallback")
+        
+        # Start GRVT WebSocket monitor task
+        asyncio.create_task(self.monitor_grvt_websocket())
 
         # Setup Lighter websocket
         try:
@@ -1393,12 +1593,23 @@ class HedgeBot:
         await self.take_position_snapshot()
         self.logger.info("📸 Initial position snapshot taken")
         
+        # 顯示策略參數
+        self.logger.info("=" * 80)
+        self.logger.info("🎯 PYRAMID STRATEGY PARAMETERS")
+        self.logger.info("=" * 80)
+        self.logger.info(f"📊 Max Position: {self.max_position:.4f}")
+        self.logger.info(f"📊 Order Quantity: {self.order_quantity:.4f}")
+        self.logger.info(f"📊 Expected Building Steps: {int(self.max_position / self.order_quantity)}")
+        self.logger.info(f"📊 Total Iterations: {self.iterations}")
+        self.logger.info("=" * 80)
+        
         iterations = 0
         while iterations < self.iterations and not self.stop_flag:
             iterations += 1
-            self.logger.info("-----------------------------------------------")
-            self.logger.info(f"🔄 Trading loop iteration {iterations}")
-            self.logger.info("-----------------------------------------------")
+            self.logger.info("")
+            self.logger.info("=" * 80)
+            self.logger.info(f"🔄 ITERATION {iterations}/{self.iterations}")
+            self.logger.info("=" * 80)
 
             # 拍攝快照
             await self.check_and_take_snapshot()
@@ -1412,79 +1623,54 @@ class HedgeBot:
             self.logger.info(f"📈 GRVT Position: {self.grvt_position:.4f}")
             self.logger.info(f"📉 Lighter Position: {self.lighter_position:.4f}")
             self.logger.info(f"⚖️ Position Difference: {position_diff:.4f}")
+            self.logger.info(f"🏗️ Current Phase: {self.current_phase.upper()}")
             self.logger.info("=" * 80)
 
+            # 檢查持倉差異是否過大
             if abs(self.grvt_position + self.lighter_position) > 0.2:
                 self.logger.error(f"❌ Position diff is too large: {self.grvt_position + self.lighter_position}")
+                self.logger.error(f"❌ Stopping trading loop for safety")
                 break
 
+            # 使用策略決策函數來決定下一步動作
+            try:
+                side, quantity = self.get_next_action()
+            except Exception as e:
+                self.logger.error(f"❌ Error in strategy decision: {e}")
+                self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+                break
+
+            # 重置訂單狀態
             self.order_execution_complete = False
             self.waiting_for_lighter_fill = False
+            
+            # 執行 GRVT 訂單
             try:
-                # Determine side based on some logic (for now, alternate)
-                side = 'buy'
-                await self.place_grvt_post_only_order(side, self.order_quantity)
+                await self.place_grvt_post_only_order(side, quantity)
             except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
+                self.logger.error(f"⚠️ Error placing GRVT order: {e}")
                 self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
+                # 不中斷循環，繼續下一次迭代
+                continue
 
+            # 等待訂單完成（GRVT 和 Lighter 對沖都完成）
             start_time = time.time()
-            self.logger.info(f"⏳ Waiting for GRVT order to fill and trigger Lighter hedge...")
+            self.logger.info(f"⏳ Waiting for order execution to complete...")
             while not self.order_execution_complete and not self.stop_flag:
-                # Check if GRVT order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    self.logger.info(f"🎯 GRVT order filled! Placing Lighter {self.current_lighter_side} order...")
-                    await self.place_lighter_market_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
-                    break
-                
                 # 檢查是否需要拍攝快照
                 await self.check_and_take_snapshot()
                 
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.1)
                 if time.time() - start_time > 180:
-                    self.logger.error("❌ Timeout waiting for trade completion")
+                    self.logger.error("❌ Timeout waiting for trade completion (180s)")
                     break
 
             if self.stop_flag:
                 break
 
-            # Close position
-            self.logger.info(f"[STEP 2] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            try:
-                # Determine side based on some logic (for now, alternate)
-                side = 'sell'
-                await self.place_grvt_post_only_order(side, self.order_quantity)
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
-
-            self.logger.info(f"⏳ Waiting for GRVT order to fill and trigger Lighter hedge...")
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if GRVT order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    self.logger.info(f"🎯 GRVT order filled! Placing Lighter {self.current_lighter_side} order...")
-                    await self.place_lighter_market_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
-                    break
-                
-                await asyncio.sleep(0.01)
-                if time.time() - start_time > 180:
-                    self.logger.error("❌ Timeout waiting for trade completion")
-                    break
-
-            # Close remaining position
-            self.logger.info(f"[STEP 3] GRVT position: {self.grvt_position} | Lighter position: {self.lighter_position}")
+            # 訂單執行完成後的狀態檢查
+            self.logger.info(f"✅ Order execution completed")
+            self.logger.info(f"📊 Updated positions - GRVT: {self.grvt_position:.4f}, Lighter: {self.lighter_position:.4f}")
             
             # 檢查持倉是否完全對沖
             position_diff = abs(self.grvt_position + self.lighter_position)
@@ -1496,38 +1682,17 @@ class HedgeBot:
             else:
                 self.logger.info(f"✅ Positions balanced: diff={position_diff:.6f}")
             
-            self.order_execution_complete = False
-            self.waiting_for_lighter_fill = False
-            if self.grvt_position == 0:
-                continue
-            elif self.grvt_position > 0:
-                side = 'sell'
-            else:
-                side = 'buy'
-
-            try:
-                # Determine side based on some logic (for now, alternate)
-                await self.place_grvt_post_only_order(side, abs(self.grvt_position))
-            except Exception as e:
-                self.logger.error(f"⚠️ Error in trading loop: {e}")
-                self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
-                break
-
-            # Wait for order to be filled via WebSocket
-            while not self.order_execution_complete and not self.stop_flag:
-                # Check if GRVT order filled and we need to place Lighter order
-                if self.waiting_for_lighter_fill:
-                    await self.place_lighter_market_order(
-                        self.current_lighter_side,
-                        self.current_lighter_quantity,
-                        self.current_lighter_price
-                    )
-                    break
-                
-                await asyncio.sleep(0.01)
-                if time.time() - start_time > 180:
-                    self.logger.error("❌ Timeout waiting for trade completion")
-                    break
+            # 檢查是否達到階段轉換點
+            if self.current_phase == 'building' and abs(self.grvt_position) >= self.max_position - Decimal('0.001'):
+                self.current_phase = 'closing'
+                self.logger.info(f"🔄 Reached MAX position, switching to CLOSING phase")
+            elif self.current_phase == 'closing' and abs(self.grvt_position) <= Decimal('0.001'):
+                self.current_phase = 'building'
+                self.logger.info(f"🔄 Reached ZERO position, switching to BUILDING phase")
+                self.logger.info(f"✅ Completed one full cycle (BUILD → CLOSE)")
+            
+            # 等待一小段時間再進行下一次交易
+            await asyncio.sleep(2)
 
     async def run(self):
         """Run the hedge bot."""
@@ -1583,13 +1748,15 @@ class HedgeBot:
 
 def parse_arguments():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Trading bot for GRVT and Lighter')
+    parser = argparse.ArgumentParser(description='Trading bot for GRVT and Lighter with pyramid strategy')
     parser.add_argument('--exchange', type=str,
                         help='Exchange')
     parser.add_argument('--ticker', type=str, default='BTC',
                         help='Ticker symbol (default: BTC)')
     parser.add_argument('--size', type=str,
                         help='Number of tokens to buy/sell per order')
+    parser.add_argument('--max-position', type=str,
+                        help='Maximum position size for pyramid strategy (default: size * 5)')
     parser.add_argument('--iter', type=int,
                         help='Number of iterations to run')
     parser.add_argument('--fill-timeout', type=int, default=30,

@@ -33,6 +33,10 @@ ASTER_SECRET_KEY=your_aster_secret_key
 API_KEY_PRIVATE_KEY=your_api_key_private_key_here
 LIGHTER_ACCOUNT_INDEX=0
 LIGHTER_API_KEY_INDEX=0
+# Margin Mode: "isolated" (逐倉) or "cross" (全倉). Default: not set (使用交易所默認設置)
+LIGHTER_MARGIN_MODE=isolated
+# Leverage: 槓桿倍數 (e.g., 5, 10, 20). Default: 10
+LIGHTER_LEVERAGE=10
 
 # Extended Configuration
 EXTENDED_API_KEY=your_extended_api_key
