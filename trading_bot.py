@@ -166,10 +166,10 @@ class TradingBot:
         if len(self.active_close_orders) >= self.config.max_orders:
             return 1
         
-        # Check if we have too much position (more than 100x quantity)
-        # Note: Changed from 20x to 100x to allow larger positions (10000 max for quantity=100)
+        # Check if we have too much position (more than max_orders * quantity)
+        # This ensures position limit scales with max_orders setting
         if hasattr(self, 'current_position') and self.current_position:
-            max_position = self.config.quantity * 100  # Limit to 100x quantity (e.g., 100*100=10000)
+            max_position = self.config.quantity * self.config.max_orders  # e.g., 100 * 100 = 10000
             if abs(self.current_position) > max_position:
                 self.logger.log(f"Position too large ({self.current_position}), pausing new orders for 5s", "WARNING")
                 return 5  # Wait 5 seconds if position is too large
