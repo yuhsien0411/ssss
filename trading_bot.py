@@ -508,28 +508,42 @@ class TradingBot:
                 raise ValueError("No bid/ask data available")
 
             if self.config.direction == "buy":
-                new_order_close_price = best_ask * (1 + self.config.take_profit/100)
-                ratio = next_close_price / new_order_close_price
-                threshold = 1 + self.config.grid_step/100
-                self.logger.log(f"[GRID] BUY: next={next_close_price:.5f} new={new_order_close_price:.5f} ratio={ratio:.5f} threshold={threshold:.5f}", "INFO")
-                if ratio > threshold:
-                    self.logger.log(f"[GRID] ✅ OK - Grid step condition met", "INFO")
+                # BUY direction: open at best_bid, close at higher price (best_bid * (1 + tp))
+                # Get current opening price (where we would buy)
+                new_open_price = best_bid
+                # Calculate where we would close
+                new_order_close_price = new_open_price * (1 + self.config.take_profit/100)
+                
+                # Calculate the distance between new close price and existing close price
+                # For BUY: we want next_close_price (existing) - new_order_close_price (new) >= grid_step
+                price_diff_percent = abs((next_close_price - new_order_close_price) / new_order_close_price) * 100
+                
+                self.logger.log(f"[GRID] BUY: open={new_open_price:.5f} new_close={new_order_close_price:.5f} existing_close={next_close_price:.5f} diff={price_diff_percent:.3f}% threshold={self.config.grid_step}%", "INFO")
+                
+                if price_diff_percent >= self.config.grid_step:
+                    self.logger.log(f"[GRID] ✅ OK - Grid step condition met ({price_diff_percent:.3f}% >= {self.config.grid_step}%)", "INFO")
                     return True
                 else:
-                    self.logger.log(f"[GRID] ❌ SKIP - Too close, waiting for price change", "INFO")
+                    self.logger.log(f"[GRID] ❌ SKIP - Too close ({price_diff_percent:.3f}% < {self.config.grid_step}%)", "INFO")
                     return False
             elif self.config.direction == "sell":
-                new_order_close_price = best_bid * (1 - self.config.take_profit/100)
-                # For SELL: as price goes UP, close prices also go UP
-                # We want: new_order_close_price / next_close_price > 1 + grid_step
-                ratio = new_order_close_price / next_close_price
-                threshold = 1 + self.config.grid_step/100
-                self.logger.log(f"[GRID] SELL: next={next_close_price:.5f} new={new_order_close_price:.5f} ratio={ratio:.5f} threshold={threshold:.5f}", "INFO")
-                if ratio > threshold:
-                    self.logger.log(f"[GRID] ✅ OK - Grid step condition met", "INFO")
+                # SELL direction: open at best_ask, close at lower price (best_ask * (1 - tp))
+                # Get current opening price (where we would sell)
+                new_open_price = best_ask
+                # Calculate where we would close
+                new_order_close_price = new_open_price * (1 - self.config.take_profit/100)
+                
+                # Calculate the distance between new close price and existing close price
+                # For SELL: we want abs(next_close_price - new_order_close_price) >= grid_step
+                price_diff_percent = abs((next_close_price - new_order_close_price) / new_order_close_price) * 100
+                
+                self.logger.log(f"[GRID] SELL: open={new_open_price:.5f} new_close={new_order_close_price:.5f} existing_close={next_close_price:.5f} diff={price_diff_percent:.3f}% threshold={self.config.grid_step}%", "INFO")
+                
+                if price_diff_percent >= self.config.grid_step:
+                    self.logger.log(f"[GRID] ✅ OK - Grid step condition met ({price_diff_percent:.3f}% >= {self.config.grid_step}%)", "INFO")
                     return True
                 else:
-                    self.logger.log(f"[GRID] ❌ SKIP - Too close, waiting for price change", "INFO")
+                    self.logger.log(f"[GRID] ❌ SKIP - Too close ({price_diff_percent:.3f}% < {self.config.grid_step}%)", "INFO")
                     return False
             else:
                 raise ValueError(f"Invalid direction: {self.config.direction}")
