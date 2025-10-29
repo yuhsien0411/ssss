@@ -269,12 +269,19 @@ class TradingBot:
         """Handle the result of an order placement."""
         order_id = order_result.order_id
         filled_price = order_result.price
+        
+        # Use actual filled amount, or order_filled_amount if set
+        filled_quantity = self.order_filled_amount if self.order_filled_amount > 0 else self.config.quantity
+        
+        # Log the filled quantity
+        if filled_quantity != self.config.quantity:
+            self.logger.log(f"[OPEN] Partial fill detected: filled={filled_quantity}, requested={self.config.quantity}", "WARNING")
 
         if self.order_filled_event.is_set() or order_result.status == 'FILLED':
             if self.config.boost_mode:
                 close_order_result = await self.exchange_client.place_market_order(
                     self.config.contract_id,
-                    self.config.quantity,
+                    filled_quantity,  # ✅ Use actual filled quantity
                     self.config.close_order_side
                 )
             else:
@@ -286,9 +293,10 @@ class TradingBot:
                 else:
                     close_price = filled_price * (1 - self.config.take_profit/100)
 
+                self.logger.log(f"[CLOSE] Placing close order for filled quantity: {filled_quantity} @ {close_price}", "INFO")
                 close_order_result = await self.exchange_client.place_close_order(
                     self.config.contract_id,
-                    self.config.quantity,
+                    filled_quantity,  # ✅ Use actual filled quantity instead of config.quantity
                     close_price,
                     close_side
                 )
@@ -345,6 +353,8 @@ class TradingBot:
                     raise Exception(f"[OPEN] Error cancelling order: {self.exchange_client.current_order.status}")
                 else:
                     self.order_filled_amount = self.exchange_client.current_order.filled_size
+                    if self.order_filled_amount > 0:
+                        self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
             else:
                 try:
                     cancel_result = await self.exchange_client.cancel_order(order_id)
@@ -368,8 +378,12 @@ class TradingBot:
                         except asyncio.TimeoutError:
                             order_info = await self.exchange_client.get_order_info(order_id)
                             self.order_filled_amount = order_info.filled_size
+                
+                if self.order_filled_amount > 0:
+                    self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
 
             if self.order_filled_amount > 0:
+                self.logger.log(f"[CLOSE] Creating close order for partial fill: {self.order_filled_amount} @ {filled_price}", "INFO")
                 close_side = self.config.close_order_side
                 if self.config.boost_mode:
                     close_order_result = await self.exchange_client.place_close_order(
@@ -384,6 +398,7 @@ class TradingBot:
                     else:
                         close_price = filled_price * (1 - self.config.take_profit/100)
 
+                    self.logger.log(f"[CLOSE] Placing close order for partial fill: {self.order_filled_amount} @ {close_price}", "INFO")
                     close_order_result = await self.exchange_client.place_close_order(
                         self.config.contract_id,
                         self.order_filled_amount,
