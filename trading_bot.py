@@ -352,7 +352,20 @@ class TradingBot:
                 if self.exchange_client.current_order.status not in ['CANCELED', 'FILLED']:
                     raise Exception(f"[OPEN] Error cancelling order: {self.exchange_client.current_order.status}")
                 else:
-                    self.order_filled_amount = self.exchange_client.current_order.filled_size
+                    # ⚠️ WebSocket's filled_size may be inaccurate, force API query
+                    self.logger.log(f"[OPEN] [{order_id}] Order canceled, querying API for accurate filled_size...", "INFO")
+                    await asyncio.sleep(0.5)  # Wait for exchange to process
+                    
+                    # Force API query to get accurate filled amount
+                    order_info = await self.exchange_client.get_order_info(order_id)
+                    if order_info:
+                        self.order_filled_amount = order_info.filled_size
+                        self.logger.log(f"[OPEN] [{order_id}] API query result: filled_size={self.order_filled_amount}", "INFO")
+                    else:
+                        # Fallback to WebSocket data if API fails
+                        self.order_filled_amount = self.exchange_client.current_order.filled_size
+                        self.logger.log(f"[OPEN] [{order_id}] API query failed, using WebSocket data: filled_size={self.order_filled_amount}", "WARNING")
+                    
                     if self.order_filled_amount > 0:
                         self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
             else:
