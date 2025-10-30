@@ -912,7 +912,7 @@ class LighterClient(BaseExchangeClient):
         # Get active orders for the specific market
         orders_response = await order_api.account_active_orders(
             account_index=self.account_index,
-            market_id=self.config.contract_id,
+            market_id=int(self.config.contract_id),
             auth=auth_token
         )
 
@@ -933,6 +933,7 @@ class LighterClient(BaseExchangeClient):
 
         # Filter orders for the specific market
         contract_orders = []
+        seen_ids = set()
         for order in order_list:
             # Convert Lighter Order to OrderInfo
             side = "sell" if order.is_ask else "buy"
@@ -941,7 +942,7 @@ class LighterClient(BaseExchangeClient):
 
             # Only include orders with remaining size > 0
             if size > 0:
-                contract_orders.append(OrderInfo(
+                oi = OrderInfo(
                     order_id=str(order.order_index),
                     side=side,
                     size=Decimal(order.remaining_base_amount),  # Use remaining size for active orders
@@ -950,7 +951,27 @@ class LighterClient(BaseExchangeClient):
                     filled_size=Decimal(order.filled_base_amount),
                     remaining_size=Decimal(order.remaining_base_amount),
                     client_order_index=getattr(order, 'client_order_index', None)  # Add client_order_index
-                ))
+                )
+                contract_orders.append(oi)
+                seen_ids.add(str(order.order_index))
+
+        # Merge in WebSocket-cached OPEN orders to mitigate API lag
+        try:
+            for cached_id, cached in list(self.orders_cache.items()):
+                # cached structure: {'status': 'OPEN', 'filled_size': Decimal}
+                # We need more fields; rely on self.current_order if it matches, or skip if insufficient
+                if not isinstance(cached_id, (int, str)):
+                    continue
+                # Only consider if we have a recent current_order that matches this id
+                if self.current_order and (str(self.current_order.order_id) == str(cached_id)):
+                    if str(self.current_order.order_id) in seen_ids:
+                        continue
+                    if self.current_order.status.upper() == 'OPEN':
+                        contract_orders.append(self.current_order)
+                        seen_ids.add(str(self.current_order.order_id))
+        except Exception:
+            # Best-effort merge; ignore errors
+            pass
 
         return contract_orders
 

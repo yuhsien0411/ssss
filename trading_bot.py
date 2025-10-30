@@ -559,6 +559,15 @@ class TradingBot:
             if deficit <= 0:
                 return False
 
+            # Duplicate-suppression: avoid placing the same reconcile twice within a short window
+            now_ts = time.time()
+            deficit_signature = f"{close_side}:{deficit}"
+            last_sig = getattr(self, "_last_reconcile_signature", None)
+            last_ts = getattr(self, "_last_reconcile_time", 0)
+            if last_sig == deficit_signature and (now_ts - last_ts) < 5:
+                self.logger.log(f"[RECONCILE] Skip duplicate within 5s window for {deficit_signature}", "INFO")
+                return False
+
             # Compute reasonable TP price relative to market
             market_ref = await self.exchange_client.get_order_price('sell' if close_side == 'buy' else 'buy')
             if close_side == 'sell':
@@ -582,6 +591,9 @@ class TradingBot:
 
                 if result.success:
                     self.logger.log(f"[RECONCILE] ✅ Placed top-up close order {deficit} on attempt {retry+1}", "INFO")
+                    # record signature to prevent rapid duplicate in case API-active-orders lag
+                    self._last_reconcile_signature = deficit_signature
+                    self._last_reconcile_time = time.time()
                     return True
                 else:
                     if close_side == 'sell':
