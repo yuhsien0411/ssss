@@ -612,6 +612,7 @@ class LighterClient(BaseExchangeClient):
         
         # Use retry mechanism for nonce errors
         max_retries = 3
+        order_result = None
         for attempt in range(max_retries):
             try:
                 # Use POST-ONLY order to ensure maker-only execution
@@ -623,7 +624,7 @@ class LighterClient(BaseExchangeClient):
                     await asyncio.sleep(1)  # Wait longer for nonce refresh
                     continue
                 else:
-            raise Exception(f"[OPEN] Error placing order: {order_result.error_message}")
+                    raise Exception(f"[OPEN] Error placing order: {order_result.error_message}")
             except Exception as e:
                 if 'invalid nonce' in str(e).lower() and attempt < max_retries - 1:
                     self.logger.log(f"[OPEN] Nonce error on attempt {attempt + 1}/{max_retries}, retrying...", "WARNING")
@@ -634,13 +635,13 @@ class LighterClient(BaseExchangeClient):
 
         # Simplified - don't wait for order to fill, just return success
         # The order will be monitored by WebSocket and trading bot logic
-            return OrderResult(
-                success=True,
-                order_id=order_result.order_id,
-                side=direction,
-                size=quantity,
-                price=order_price,
-                status='OPEN'
+        return OrderResult(
+            success=True,
+            order_id=order_result.order_id if order_result else '',
+            side=direction,
+            size=quantity,
+            price=order_price,
+            status='OPEN'
         )
 
     async def _get_active_close_orders(self, contract_id: str) -> int:
@@ -731,7 +732,7 @@ class LighterClient(BaseExchangeClient):
             if order_book.bids and len(order_book.bids) > 0:
                 best_bid_api = Decimal(order_book.bids[0].price)
                 self.logger.log(f"API Best Bid: {best_bid_api} (amount: {order_book.bids[0].remaining_base_amount})", "INFO")
-        else:
+            else:
                 best_bid_api = None
                 
             if order_book.asks and len(order_book.asks) > 0:
