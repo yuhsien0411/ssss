@@ -305,7 +305,7 @@ class TradingBot:
                         close_side
                     )
                     if self.config.exchange == "lighter":
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.5)
 
                     if close_order_result.success:
                         self.logger.log(f"[CLOSE] Successfully placed close order on attempt {retry + 1}", "INFO")
@@ -464,7 +464,7 @@ class TradingBot:
                             close_side
                         )
                         if self.config.exchange == "lighter":
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(0.5)
 
                         if close_order_result.success:
                             self.logger.log(f"[CLOSE] ✅ Successfully placed REDUCE-ONLY + POST-ONLY partial fill close order on attempt {retry + 1}", "INFO")

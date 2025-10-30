@@ -698,8 +698,8 @@ class LighterClient(BaseExchangeClient):
                     error_message=error
                 )
 
-            # Wait for order to be placed
-            await asyncio.sleep(1)
+            # Wait for order to be placed (reduced sleep time)
+            await asyncio.sleep(0.5)
             
             return OrderResult(
                 success=True,
