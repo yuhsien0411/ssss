@@ -531,6 +531,78 @@ class TradingBot:
         """Log status information periodically, including positions."""
         if time.time() - self.last_log_time > 60 or self.last_log_time == 0:
             print("--------------------------------")
+
+    async def _reconcile_close_coverage(self) -> bool:
+        """Ensure active close orders cover current position size.
+        Returns True if a top-up close order was placed, else False.
+        """
+        try:
+            # Require current position
+            if not hasattr(self, 'current_position'):
+                return False
+
+            position_amt = Decimal(self.current_position)
+            if position_amt == 0:
+                return False
+
+            # We only reconcile when we have exposure needing reduce-only closes
+            close_side = self.config.close_order_side
+
+            # Sum active close orders
+            active_close_amount = sum(
+                Decimal(order.get('size', 0))
+                for order in self.active_close_orders
+                if isinstance(order, dict)
+            )
+
+            # Required close amount = abs(position) for the reduce-only side
+            required_close = abs(position_amt)
+
+            if active_close_amount >= required_close:
+                return False
+
+            deficit = (required_close - active_close_amount).quantize(Decimal('0.00000001'))
+            if deficit <= 0:
+                return False
+
+            # Compute a reasonable TP price from current market using existing method
+            # We ask exchange for the open price reference and convert to TP per direction
+            market_ref = await self.exchange_client.get_order_price('sell' if close_side == 'buy' else 'buy')
+            if close_side == 'sell':
+                close_price = market_ref * (Decimal('1') + self.config.take_profit/100)
+            else:
+                close_price = market_ref * (Decimal('1') - self.config.take_profit/100)
+
+            self.logger.log(f"[RECONCILE] Position={position_amt}, ActiveClose={active_close_amount} → Deficit={deficit}. Placing RO+PO close at {close_price}", "WARNING")
+
+            # Retry logic
+            max_retries = 3
+            for retry in range(max_retries):
+                result = await self.exchange_client.place_close_order(
+                    self.config.contract_id,
+                    deficit,
+                    close_price,
+                    close_side
+                )
+                if self.config.exchange == 'lighter':
+                    await asyncio.sleep(1)
+
+                if result.success:
+                    self.logger.log(f"[RECONCILE] ✅ Placed top-up close order {deficit} on attempt {retry+1}", "INFO")
+                    return True
+                else:
+                    # slight adjust to avoid PO reject
+                    if close_side == 'sell':
+                        close_price = close_price * Decimal('1.0001')
+                    else:
+                        close_price = close_price * Decimal('0.9999')
+                    await asyncio.sleep(1)
+
+            self.logger.log("[RECONCILE] ❌ Failed to place top-up close order after retries", "ERROR")
+            return False
+        except Exception as e:
+            self.logger.log(f"[RECONCILE] Error while reconciling close coverage: {e}", "ERROR")
+            return False
             try:
                 # Get active orders
                 active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
@@ -609,12 +681,8 @@ class TradingBot:
                 # BUY direction: open at best_bid, close at higher price (best_bid * (1 + tp))
                 # Get current opening price (where we would buy)
                 new_open_price = best_bid
-                # Calculate where we would close (rounded to tick to avoid drift)
+                # Calculate where we would close
                 new_order_close_price = new_open_price * (1 + self.config.take_profit/100)
-                try:
-                    new_order_close_price = self.exchange_client.round_to_tick(new_order_close_price)
-                except Exception:
-                    pass
                 
                 # Calculate the distance between new close price and existing close price
                 # For BUY: we want next_close_price (existing) - new_order_close_price (new) >= grid_step
@@ -632,12 +700,8 @@ class TradingBot:
                 # SELL direction: open at best_ask, close at lower price (best_ask * (1 - tp))
                 # Get current opening price (where we would sell)
                 new_open_price = best_ask
-                # Calculate where we would close (rounded to tick to avoid drift)
+                # Calculate where we would close
                 new_order_close_price = new_open_price * (1 - self.config.take_profit/100)
-                try:
-                    new_order_close_price = self.exchange_client.round_to_tick(new_order_close_price)
-                except Exception:
-                    pass
                 
                 # Calculate the distance between new close price and existing close price
                 # For SELL: we want abs(next_close_price - new_order_close_price) >= grid_step
@@ -771,6 +835,16 @@ class TradingBot:
                         await asyncio.sleep(wait_time)
                         continue
                     
+                    # Ensure TP coverage first
+                    try:
+                        placed_topup = await self._reconcile_close_coverage()
+                        if placed_topup:
+                            # Give exchange a moment to register the new order
+                            await asyncio.sleep(1)
+                            continue
+                    except Exception as e:
+                        self.logger.log(f"[RECONCILE] Error: {e}", "ERROR")
+
                     # Check if we have capacity for new orders
                     if len(self.active_close_orders) < self.config.max_orders:
                         # Check grid step condition
