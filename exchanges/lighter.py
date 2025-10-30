@@ -653,25 +653,70 @@ class LighterClient(BaseExchangeClient):
         return active_close_orders
 
     async def place_close_order(self, contract_id: str, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
-        """Place a close order with Lighter using official SDK (POST-ONLY)."""
+        """Place a close order with Lighter using official SDK (POST-ONLY + REDUCE-ONLY)."""
         self.current_order = None
         self.current_order_client_id = None
-        # Use POST-ONLY order to ensure maker-only execution
-        order_result = await self.place_post_only_order(contract_id, quantity, price, side)
+        
+        # Ensure client is initialized
+        if self.lighter_client is None:
+            await self._initialize_lighter_client()
 
-        # wait for 5 seconds to ensure order is placed
-        await asyncio.sleep(5)
-        if order_result.success:
+        # Ensure margin mode is set (force reset if configured)
+        await self._ensure_margin_mode(force=self.margin_mode_force_before_order)
+
+        # Determine order side and price
+        if side.lower() == 'buy':
+            is_ask = False
+        elif side.lower() == 'sell':
+            is_ask = True
+        else:
+            raise Exception(f"Invalid side: {side}")
+
+        # Generate unique client order index
+        client_order_index = int(time.time() * 1000) % 1000000
+        self.current_order_client_id = client_order_index
+
+        try:
+            # Use the official SDK's create_order method with POST_ONLY + REDUCE_ONLY
+            tx, tx_hash, error = await self.lighter_client.create_order(
+                market_index=self.config.contract_id,
+                client_order_index=client_order_index,
+                base_amount=int(quantity * self.base_amount_multiplier),
+                price=int(price * self.price_multiplier),
+                is_ask=is_ask,
+                order_type=self.lighter_client.ORDER_TYPE_LIMIT,
+                time_in_force=self.lighter_client.ORDER_TIME_IN_FORCE_POST_ONLY,
+                order_expiry=self.lighter_client.DEFAULT_28_DAY_ORDER_EXPIRY,
+                reduce_only=True,  # ✅ REDUCE ONLY for close orders
+                trigger_price=0
+            )
+
+            if error is not None:
+                return OrderResult(
+                    success=False,
+                    order_id=str(client_order_index),
+                    error_message=error
+                )
+
+            # Wait for order to be placed
+            await asyncio.sleep(1)
+            
             return OrderResult(
                 success=True,
-                order_id=order_result.order_id,
+                order_id=str(client_order_index),
                 side=side,
                 size=quantity,
                 price=price,
                 status='OPEN'
             )
-        else:
-            raise Exception(f"[CLOSE] Error placing order: {order_result.error_message}")
+
+        except Exception as e:
+            self.logger.log(f"Error placing close order: {e}", "ERROR")
+            return OrderResult(
+                success=False,
+                order_id=str(client_order_index),
+                error_message=str(e)
+            )
     
     async def fetch_order_book_from_api(self, market_id: int, limit: int = 10):
         """Fetch order book using official Lighter API."""

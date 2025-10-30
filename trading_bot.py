@@ -429,7 +429,8 @@ class TradingBot:
                         self.logger.log(f"[OPEN] [{order_id}] Using order_result price as filled price: {filled_price}", "INFO")
 
             if self.order_filled_amount > 0:
-                self.logger.log(f"[CLOSE] Creating close order for partial fill: {self.order_filled_amount} @ {filled_price}", "INFO")
+                self.logger.log(f"[CLOSE] 🎯 PARTIAL FILL DETECTED: {self.order_filled_amount}/{self.config.quantity} @ {filled_price}", "WARNING")
+                self.logger.log(f"[CLOSE] Creating REDUCE-ONLY + POST-ONLY close order for partial fill", "INFO")
                 close_side = self.config.close_order_side
                 if self.config.boost_mode:
                     close_order_result = await self.exchange_client.place_close_order(
@@ -444,7 +445,7 @@ class TradingBot:
                     else:
                         close_price = filled_price * (1 - self.config.take_profit/100)
 
-                    self.logger.log(f"[CLOSE] Placing close order for partial fill: {self.order_filled_amount} @ {close_price}", "INFO")
+                    self.logger.log(f"[CLOSE] Placing REDUCE-ONLY + POST-ONLY close order: {self.order_filled_amount} @ {close_price}", "INFO")
                     
                     # Retry logic for partial fill close order placement
                     max_retries = 3
@@ -459,7 +460,7 @@ class TradingBot:
                             await asyncio.sleep(1)
 
                         if close_order_result.success:
-                            self.logger.log(f"[CLOSE] Successfully placed partial fill close order on attempt {retry + 1}", "INFO")
+                            self.logger.log(f"[CLOSE] ✅ Successfully placed REDUCE-ONLY + POST-ONLY partial fill close order on attempt {retry + 1}", "INFO")
                             break
                         else:
                             self.logger.log(f"[CLOSE] Failed to place partial fill close order (attempt {retry + 1}/{max_retries}): {close_order_result.error_message}", "WARNING")
