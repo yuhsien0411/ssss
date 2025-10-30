@@ -533,31 +533,25 @@ class TradingBot:
             print("--------------------------------")
 
     async def _reconcile_close_coverage(self) -> bool:
-        """Ensure active close orders cover current position size.
+        """Ensure active close orders cover current position size using fresh API reads.
         Returns True if a top-up close order was placed, else False.
         """
         try:
-            # Require current position
-            if not hasattr(self, 'current_position'):
-                return False
-
-            position_amt = Decimal(self.current_position)
+            # Always fetch fresh position and active orders
+            position_amt = await self.exchange_client.get_account_positions()
             if position_amt == 0:
                 return False
 
-            # We only reconcile when we have exposure needing reduce-only closes
-            close_side = self.config.close_order_side
-
-            # Sum active close orders
+            # Fetch active orders and sum close-side sizes
+            active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
             active_close_amount = sum(
-                Decimal(order.get('size', 0))
-                for order in self.active_close_orders
-                if isinstance(order, dict)
+                Decimal(getattr(o, 'size', 0)) if not isinstance(o, dict) else Decimal(o.get('size', 0))
+                for o in active_orders
+                if (getattr(o, 'side', None) == self.config.close_order_side) or (isinstance(o, dict) and o.get('side') == self.config.close_order_side)
             )
 
-            # Required close amount = abs(position) for the reduce-only side
+            close_side = self.config.close_order_side
             required_close = abs(position_amt)
-
             if active_close_amount >= required_close:
                 return False
 
@@ -565,8 +559,7 @@ class TradingBot:
             if deficit <= 0:
                 return False
 
-            # Compute a reasonable TP price from current market using existing method
-            # We ask exchange for the open price reference and convert to TP per direction
+            # Compute reasonable TP price relative to market
             market_ref = await self.exchange_client.get_order_price('sell' if close_side == 'buy' else 'buy')
             if close_side == 'sell':
                 close_price = market_ref * (Decimal('1') + self.config.take_profit/100)
@@ -575,7 +568,7 @@ class TradingBot:
 
             self.logger.log(f"[RECONCILE] Position={position_amt}, ActiveClose={active_close_amount} → Deficit={deficit}. Placing RO+PO close at {close_price}", "WARNING")
 
-            # Retry logic
+            # Retry logic with micro-adjust to satisfy PO
             max_retries = 3
             for retry in range(max_retries):
                 result = await self.exchange_client.place_close_order(
@@ -591,7 +584,6 @@ class TradingBot:
                     self.logger.log(f"[RECONCILE] ✅ Placed top-up close order {deficit} on attempt {retry+1}", "INFO")
                     return True
                 else:
-                    # slight adjust to avoid PO reject
                     if close_side == 'sell':
                         close_price = close_price * Decimal('1.0001')
                     else:
