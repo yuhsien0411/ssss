@@ -476,10 +476,20 @@ class TradingBot:
                         close_side
                     )
                 else:
+                    # Use API mid price to compute TP target to reduce PO cancellations
+                    try:
+                        api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                        if api_bid and api_ask:
+                            mid_price = (api_bid + api_ask) / 2
+                        else:
+                            # Fallback to filled price if API not available
+                            mid_price = filled_price
+                    except Exception:
+                        mid_price = filled_price
                     if close_side == 'sell':
-                        close_price = filled_price * (1 + self.config.take_profit/100)
+                        close_price = mid_price * (1 + self.config.take_profit/100)
                     else:
-                        close_price = filled_price * (1 - self.config.take_profit/100)
+                        close_price = mid_price * (1 - self.config.take_profit/100)
                     # Deduplicate: skip if similar close already exists
                     try:
                         active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
@@ -595,12 +605,22 @@ class TradingBot:
                 self.logger.log(f"[RECONCILE] Skip duplicate within 5s window for {deficit_signature}", "INFO")
                 return False
 
-            # Compute reasonable TP price relative to market
-            market_ref = await self.exchange_client.get_order_price('sell' if close_side == 'buy' else 'buy')
+            # Compute TP from API mid price to reduce PO cancellations
+            try:
+                api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                if api_bid and api_ask:
+                    mid_price = (api_bid + api_ask) / 2
+                else:
+                    # Fallback: use get_order_price as a conservative reference
+                    market_ref = await self.exchange_client.get_order_price('sell' if close_side == 'buy' else 'buy')
+                    mid_price = market_ref
+            except Exception:
+                market_ref = await self.exchange_client.get_order_price('sell' if close_side == 'buy' else 'buy')
+                mid_price = market_ref
             if close_side == 'sell':
-                close_price = market_ref * (Decimal('1') + self.config.take_profit/100)
+                close_price = mid_price * (Decimal('1') + self.config.take_profit/100)
             else:
-                close_price = market_ref * (Decimal('1') - self.config.take_profit/100)
+                close_price = mid_price * (Decimal('1') - self.config.take_profit/100)
 
             self.logger.log(f"[RECONCILE] Position={position_amt}, ActiveClose={active_close_amount} → Deficit={deficit}. Placing RO+PO close at {close_price}", "WARNING")
 
