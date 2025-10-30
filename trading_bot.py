@@ -481,6 +481,20 @@ class TradingBot:
                         close_price = filled_price * (1 + self.config.take_profit/100)
                     else:
                         close_price = filled_price * (1 - self.config.take_profit/100)
+                    # Deduplicate: skip if similar close already exists
+                    try:
+                        active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
+                        tick = getattr(self.config, 'tick_size', Decimal('0')) or Decimal('0')
+                        for o in active_orders:
+                            if o.side != close_side:
+                                continue
+                            size_close_enough = abs(Decimal(o.size) - self.order_filled_amount) <= max(Decimal('0.5'), self.order_filled_amount * Decimal('0.02'))
+                            price_close_enough = (tick > 0 and abs(Decimal(o.price) - close_price) <= tick * 3) or (abs(Decimal(o.price) - close_price) / close_price <= Decimal('0.002'))
+                            if size_close_enough and price_close_enough:
+                                self.logger.log(f"[CLOSE] Skip duplicate TP: existing size={o.size} price={o.price}", "INFO")
+                                return
+                    except Exception:
+                        pass
 
                     self.logger.log(f"[CLOSE] Placing REDUCE-ONLY + POST-ONLY close order: {self.order_filled_amount} @ {close_price}", "INFO")
                     
@@ -576,6 +590,21 @@ class TradingBot:
                 close_price = market_ref * (Decimal('1') - self.config.take_profit/100)
 
             self.logger.log(f"[RECONCILE] Position={position_amt}, ActiveClose={active_close_amount} → Deficit={deficit}. Placing RO+PO close at {close_price}", "WARNING")
+
+            # Skip if a similar close already exists (API may have lagged earlier)
+            try:
+                active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
+                tick = getattr(self.config, 'tick_size', Decimal('0')) or Decimal('0')
+                for o in active_orders:
+                    if o.side != close_side:
+                        continue
+                    size_close_enough = abs(Decimal(o.size) - deficit) <= max(Decimal('0.5'), deficit * Decimal('0.02'))
+                    price_close_enough = (tick > 0 and abs(Decimal(o.price) - close_price) <= tick * 3) or (abs(Decimal(o.price) - close_price) / close_price <= Decimal('0.002'))
+                    if size_close_enough and price_close_enough:
+                        self.logger.log(f"[RECONCILE] Skip: similar TP exists size={o.size} price={o.price}", "INFO")
+                        return False
+            except Exception:
+                pass
 
             # Retry logic with micro-adjust to satisfy PO
             max_retries = 3
