@@ -21,26 +21,32 @@ chmod +x download_logs.sh
 
 ### Windows (PowerShell)
 ```powershell
+# 確保本地 logs 目錄存在
+mkdir -Force logs
+
 # 下載單個日誌文件
-scp root@your-server-ip:~/perp-dex-tools/logs/lighter_YZY_activity.log ./logs/
+scp root@your-server-ip:~/ssss/logs/lighter_YZY_activity.log ./logs/
 
 # 下載訂單 CSV
-scp root@your-server-ip:~/perp-dex-tools/logs/lighter_YZY_orders.csv ./logs/
+scp root@your-server-ip:~/ssss/logs/lighter_YZY_orders.csv ./logs/
 
 # 下載整個 logs 目錄
-scp -r root@your-server-ip:~/perp-dex-tools/logs/* ./logs/
+scp -r root@your-server-ip:~/ssss/logs/* ./logs/
 ```
 
 ### Linux/Mac
 ```bash
+# 確保本地 logs 目錄存在
+mkdir -p logs
+
 # 下載單個日誌文件
-scp root@your-server-ip:~/perp-dex-tools/logs/lighter_YZY_activity.log ./logs/
+scp root@your-server-ip:~/ssss/logs/lighter_YZY_activity.log ./logs/
 
 # 下載訂單 CSV
-scp root@your-server-ip:~/perp-dex-tools/logs/lighter_YZY_orders.csv ./logs/
+scp root@your-server-ip:~/ssss/logs/lighter_YZY_orders.csv ./logs/
 
 # 下載整個 logs 目錄
-scp -r root@your-server-ip:~/perp-dex-tools/logs/* ./logs/
+scp -r root@your-server-ip:~/ssss/logs/* ./logs/
 ```
 
 ## 方法 3: 使用 rsync（推薦，支持增量同步）
@@ -48,7 +54,7 @@ scp -r root@your-server-ip:~/perp-dex-tools/logs/* ./logs/
 ### Linux/Mac
 ```bash
 # 同步整個 logs 目錄（增量更新）
-rsync -avz root@your-server-ip:~/perp-dex-tools/logs/ ./logs/
+rsync -avz root@your-server-ip:~/ssss/logs/ ./logs/
 ```
 
 ## 方法 4: 在 screen 會話中導出日誌
@@ -71,11 +77,13 @@ scp root@your-server-ip:~/bot_output.txt ./
 ## 日誌文件位置
 
 ### 雲端
-- 日誌文件：`~/perp-dex-tools/logs/{exchange}_{ticker}_activity.log`
-- 訂單 CSV：`~/perp-dex-tools/logs/{exchange}_{ticker}_orders.csv`
+- **目錄**：`~/ssss/logs/`
+- **日誌文件**：`~/ssss/logs/{exchange}_{ticker}_activity.log`（例如：`~/ssss/logs/lighter_YZY_activity.log`）
+- **訂單 CSV**：`~/ssss/logs/{exchange}_{ticker}_orders.csv`（例如：`~/ssss/logs/lighter_YZY_orders.csv`）
 
 ### 本地
-- 下載後會保存到：`./logs/` 目錄
+- **目錄**：`perp-dex-tools/logs/`
+- **下載後會保存到**：`./logs/` 目錄（在項目根目錄下）
 
 ## 示例
 
