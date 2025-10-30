@@ -165,7 +165,7 @@ class TradingBot:
         # Check if we have too many active orders
         if len(self.active_close_orders) >= self.config.max_orders:
             return 1
-        
+
         # Check if we have too much position (more than max_orders * quantity)
         # This ensures position limit scales with max_orders setting
         if hasattr(self, 'current_position') and self.current_position:
@@ -256,7 +256,7 @@ class TradingBot:
                 elif current_status in ['CANCELED', 'REJECTED']:
                     self.logger.log(f"[OPEN] [{order_id}] Order {current_status}", "WARNING")
                     break
-            
+
             # Handle order result
             return await self._handle_order_result(order_result)
 
@@ -389,6 +389,12 @@ class TradingBot:
                     
                     if self.order_filled_amount > 0:
                         self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
+                        # Update filled_price to the actual filled price from order_info
+                        if order_info and hasattr(order_info, 'price'):
+                            filled_price = order_info.price
+                            self.logger.log(f"[OPEN] [{order_id}] Using filled price from order_info: {filled_price}", "INFO")
+                        else:
+                            self.logger.log(f"[OPEN] [{order_id}] Using order_result price as filled price: {filled_price}", "INFO")
             else:
                 try:
                     cancel_result = await self.exchange_client.cancel_order(order_id)
@@ -412,9 +418,15 @@ class TradingBot:
                         except asyncio.TimeoutError:
                             order_info = await self.exchange_client.get_order_info(order_id)
                             self.order_filled_amount = order_info.filled_size
-                
+
                 if self.order_filled_amount > 0:
                     self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
+                    # Update filled_price to the actual filled price from cancel_result
+                    if hasattr(cancel_result, 'price') and cancel_result.price:
+                        filled_price = cancel_result.price
+                        self.logger.log(f"[OPEN] [{order_id}] Using filled price from cancel_result: {filled_price}", "INFO")
+                    else:
+                        self.logger.log(f"[OPEN] [{order_id}] Using order_result price as filled price: {filled_price}", "INFO")
 
             if self.order_filled_amount > 0:
                 self.logger.log(f"[CLOSE] Creating close order for partial fill: {self.order_filled_amount} @ {filled_price}", "INFO")
@@ -433,18 +445,41 @@ class TradingBot:
                         close_price = filled_price * (1 - self.config.take_profit/100)
 
                     self.logger.log(f"[CLOSE] Placing close order for partial fill: {self.order_filled_amount} @ {close_price}", "INFO")
-                    close_order_result = await self.exchange_client.place_close_order(
-                        self.config.contract_id,
-                        self.order_filled_amount,
-                        close_price,
-                        close_side
-                    )
-                    if self.config.exchange == "lighter":
-                        await asyncio.sleep(1)
+                    
+                    # Retry logic for partial fill close order placement
+                    max_retries = 3
+                    for retry in range(max_retries):
+                        close_order_result = await self.exchange_client.place_close_order(
+                            self.config.contract_id,
+                            self.order_filled_amount,
+                            close_price,
+                            close_side
+                        )
+                        if self.config.exchange == "lighter":
+                            await asyncio.sleep(1)
+
+                        if close_order_result.success:
+                            self.logger.log(f"[CLOSE] Successfully placed partial fill close order on attempt {retry + 1}", "INFO")
+                            break
+                        else:
+                            self.logger.log(f"[CLOSE] Failed to place partial fill close order (attempt {retry + 1}/{max_retries}): {close_order_result.error_message}", "WARNING")
+                            
+                            if retry < max_retries - 1:
+                                # Adjust close price slightly to avoid Post-Only rejection
+                                if close_side == 'sell':
+                                    close_price = close_price * Decimal('1.0001')  # Increase by 0.01%
+                                else:
+                                    close_price = close_price * Decimal('0.9999')  # Decrease by 0.01%
+                                
+                                self.logger.log(f"[CLOSE] Retrying partial fill close order with adjusted price: {close_price}", "INFO")
+                                await asyncio.sleep(1)
+                            else:
+                                self.logger.log(f"[CLOSE] CRITICAL: Failed to place partial fill close order after {max_retries} attempts!", "ERROR")
+                                self.logger.log(f"[CLOSE] CRITICAL: Partial position={self.order_filled_amount} at {filled_price} has NO close order!", "ERROR")
 
                 self.last_open_order_time = time.time()
                 if not close_order_result.success:
-                    self.logger.log(f"[CLOSE] Failed to place close order: {close_order_result.error_message}", "ERROR")
+                    self.logger.log(f"[CLOSE] Failed to place partial fill close order: {close_order_result.error_message}", "ERROR")
 
             return True
 
@@ -681,7 +716,7 @@ class TradingBot:
                 if not mismatch_detected:
                     # Check wait time
                     wait_time = self._calculate_wait_time()
-                    
+
                     if wait_time > 0:
                         await asyncio.sleep(wait_time)
                         continue
