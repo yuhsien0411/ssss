@@ -632,8 +632,10 @@ class TradingBot:
             deficit_signature = f"{close_side}:{deficit}"
             last_sig = getattr(self, "_last_reconcile_signature", None)
             last_ts = getattr(self, "_last_reconcile_time", 0)
-            if last_sig == deficit_signature and (now_ts - last_ts) < 5:
-                self.logger.log(f"[RECONCILE] Skip duplicate within 5s window for {deficit_signature}", "INFO")
+            # Use longer timeout (30s) if last attempt was for the same deficit (likely failed)
+            timeout_window = 30 if (last_sig == deficit_signature) else 5
+            if last_sig == deficit_signature and (now_ts - last_ts) < timeout_window:
+                self.logger.log(f"[RECONCILE] Skip duplicate within {timeout_window}s window for {deficit_signature}", "INFO")
                 return False
 
             # Define pricing function: attempt k in [1..5]
@@ -760,10 +762,42 @@ class TradingBot:
                     reduce_only=True  # ✅ Ensure market order is reduce-only to avoid opening new position
                 )
                 if market_result and market_result.success:
-                    self.logger.log(f"[RECONCILE] ✅ Fallback market close succeeded for deficit {deficit}", "WARNING")
-                    return True
+                    market_order_id = getattr(market_result, 'order_id', None)
+                    self.logger.log(f"[RECONCILE] ✅ Fallback market close API returned success for deficit {deficit} (order_id={market_order_id})", "WARNING")
+                    
+                    # Wait and check actual order status (market orders may be immediately canceled)
+                    await asyncio.sleep(2)
+                    if market_order_id:
+                        try:
+                            order_info = await self.exchange_client.get_order_info(str(market_order_id))
+                            if order_info and order_info.status in ['CANCELED', 'CANCELED-MARGIN-NOT-ALLOWED', 'REJECTED']:
+                                self.logger.log(f"[RECONCILE] ❌ CRITICAL: Market order {market_order_id} was {order_info.status}. Position not closed.", "ERROR")
+                                # Record signature with longer timeout to prevent rapid retry (30s instead of 5s)
+                                self._last_reconcile_signature = deficit_signature
+                                self._last_reconcile_time = time.time()
+                                await self.send_notification(f"CRITICAL: Market close order {market_order_id} was {order_info.status}. Position {deficit} remains unclosed.")
+                                return False
+                        except Exception as e:
+                            self.logger.log(f"[RECONCILE] Could not verify market order status: {e}", "WARNING")
+                    
+                    # Verify position actually decreased to avoid infinite loop
+                    await asyncio.sleep(2)  # Additional wait for position update
+                    new_position = await self.exchange_client.get_account_positions()
+                    if abs(new_position) < abs(position_amt):
+                        self.logger.log(f"[RECONCILE] ✅ Position verified decreased: {position_amt} → {new_position}", "INFO")
+                        # Record signature to prevent immediate retry
+                        self._last_reconcile_signature = deficit_signature
+                        self._last_reconcile_time = time.time()
+                        return True
+                    else:
+                        self.logger.log(f"[RECONCILE] ⚠️ WARNING: Market order API success but position unchanged: {position_amt} → {new_position}. Order may have been canceled.", "WARNING")
+                        # Record signature with longer timeout (30s) to prevent rapid retry
+                        self._last_reconcile_signature = deficit_signature
+                        self._last_reconcile_time = time.time()
+                        await self.send_notification(f"WARNING: Market close order succeeded but position unchanged: {position_amt} → {new_position}")
+                        return False  # Return False so caller knows it didn't fully resolve
                 else:
-                    self.logger.log("[RECONCILE] ❌ Fallback market close failed", "ERROR")
+                    self.logger.log(f"[RECONCILE] ❌ Fallback market close failed: {getattr(market_result, 'error_message', 'unknown')}", "ERROR")
             except Exception as me:
                 self.logger.log(f"[RECONCILE] Error during fallback market close: {me}", "ERROR")
             return False
