@@ -595,16 +595,24 @@ class TradingBot:
             if position_amt == 0:
                 return False
 
-            # Fetch active orders and sum close-side sizes
+            # Determine close side by actual position sign to reduce position to zero
+            # If position > 0 (long), use 'sell' to close
+            # If position < 0 (short), use 'buy' to close
+            # This ensures we always reduce position regardless of user's direction setting
+            close_side = 'sell' if position_amt > 0 else 'buy'
+            
+            # Fetch active orders and sum close-side sizes (use actual close_side based on position)
             active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
             active_close_amount = sum(
                 Decimal(getattr(o, 'size', 0)) if not isinstance(o, dict) else Decimal(o.get('size', 0))
                 for o in active_orders
-                if (getattr(o, 'side', None) == self.config.close_order_side) or (isinstance(o, dict) and o.get('side') == self.config.close_order_side)
+                if (getattr(o, 'side', None) == close_side) or (isinstance(o, dict) and o.get('side') == close_side)
             )
-
-            # Determine true close side by current position sign
-            close_side = 'sell' if position_amt > 0 else 'buy'
+            
+            # Warn if position sign doesn't match user's direction setting
+            expected_position_sign = -1 if self.config.direction == 'sell' else 1  # sell=short(negative), buy=long(positive)
+            if (position_amt > 0 and expected_position_sign < 0) or (position_amt < 0 and expected_position_sign > 0):
+                self.logger.log(f"[RECONCILE] ⚠️ WARNING: Position={position_amt} has opposite sign from direction={self.config.direction}. Expected {'negative' if expected_position_sign < 0 else 'positive'} but got {'positive' if position_amt > 0 else 'negative'}. Will use close_side={close_side} to reduce position to zero.", "WARNING")
             required_close = abs(position_amt)
             if active_close_amount >= required_close:
                 return False
