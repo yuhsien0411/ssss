@@ -609,8 +609,12 @@ class TradingBot:
                 # BUY direction: open at best_bid, close at higher price (best_bid * (1 + tp))
                 # Get current opening price (where we would buy)
                 new_open_price = best_bid
-                # Calculate where we would close
+                # Calculate where we would close (rounded to tick to avoid drift)
                 new_order_close_price = new_open_price * (1 + self.config.take_profit/100)
+                try:
+                    new_order_close_price = self.exchange_client.round_to_tick(new_order_close_price)
+                except Exception:
+                    pass
                 
                 # Calculate the distance between new close price and existing close price
                 # For BUY: we want next_close_price (existing) - new_order_close_price (new) >= grid_step
@@ -628,8 +632,12 @@ class TradingBot:
                 # SELL direction: open at best_ask, close at lower price (best_ask * (1 - tp))
                 # Get current opening price (where we would sell)
                 new_open_price = best_ask
-                # Calculate where we would close
+                # Calculate where we would close (rounded to tick to avoid drift)
                 new_order_close_price = new_open_price * (1 - self.config.take_profit/100)
+                try:
+                    new_order_close_price = self.exchange_client.round_to_tick(new_order_close_price)
+                except Exception:
+                    pass
                 
                 # Calculate the distance between new close price and existing close price
                 # For SELL: we want abs(next_close_price - new_order_close_price) >= grid_step
