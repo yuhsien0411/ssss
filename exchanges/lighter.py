@@ -865,10 +865,19 @@ class LighterClient(BaseExchangeClient):
                 # Check if this is the order we're looking for (match by client_order_index)
                 if self.current_order.client_order_index and str(self.current_order.client_order_index) == str(order_id):
                     self.logger.log(f"[API] client_order_index match! Returning current_order", "INFO")
+                    # If it's finalized but filled_size looks missing, pull from inactive orders for authoritative fill
+                    if str(self.current_order.status).upper() in ["CANCELED", "FILLED"] and (self.current_order.filled_size is None or Decimal(self.current_order.filled_size) == 0):
+                        finalized = await self.get_finalized_order_from_api(str(order_id), max_pages=2)
+                        if finalized is not None:
+                            return finalized
                     return self.current_order
                 # Fallback: also check order_id (long ID)
                 elif str(self.current_order.order_id) == str(order_id):
                     self.logger.log(f"[API] order_id match! Returning current_order", "INFO")
+                    if str(self.current_order.status).upper() in ["CANCELED", "FILLED"] and (self.current_order.filled_size is None or Decimal(self.current_order.filled_size) == 0):
+                        finalized = await self.get_finalized_order_from_api(str(order_id), max_pages=2)
+                        if finalized is not None:
+                            return finalized
                     return self.current_order
             
             # If not found in current_order, query API for all active orders
@@ -880,9 +889,18 @@ class LighterClient(BaseExchangeClient):
                     if (str(order.order_id) == str(order_id) or 
                         (hasattr(order, 'client_order_index') and order.client_order_index and str(order.client_order_index) == str(order_id))):
                         self.logger.log(f"[API] Found order in API: order_id={order.order_id}, status={order.status}, filled={order.filled_size}", "INFO")
+                        # If finalized and filled looks zero, try inactive orders for final numbers
+                        if str(order.status).upper() in ["CANCELED", "FILLED"] and (order.filled_size is None or Decimal(order.filled_size) == 0):
+                            finalized = await self.get_finalized_order_from_api(str(order_id), max_pages=2)
+                            if finalized is not None:
+                                return finalized
                         return order
                 
-                self.logger.log(f"[API] Order {order_id} not found in active orders", "WARNING")
+                self.logger.log(f"[API] Order {order_id} not found in active orders, checking inactive orders...", "WARNING")
+                finalized = await self.get_finalized_order_from_api(str(order_id), max_pages=2)
+                if finalized is not None:
+                    self.logger.log(f"[API] Found order in inactive orders: order_id={finalized.order_id}, status={finalized.status}, filled={finalized.filled_size}", "INFO")
+                    return finalized
                 return None
                 
             except Exception as api_error:
