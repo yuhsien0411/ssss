@@ -81,6 +81,8 @@ class TradingBot:
         self.order_canceled_event = asyncio.Event()
         self.shutdown_requested = False
         self.loop = None
+        # Cache last seen partial fill during polling to rescue after cancel
+        self.last_polled_filled_size = Decimal('0')
 
         # Register order callback
         self._setup_websocket_handlers()
@@ -256,6 +258,13 @@ class TradingBot:
                 elif current_status in ['CANCELED', 'REJECTED']:
                     self.logger.log(f"[OPEN] [{order_id}] Order {current_status}", "WARNING")
                     break
+                else:
+                    # Track partial fills seen during polling
+                    try:
+                        if Decimal(str(filled_size)) > 0:
+                            self.last_polled_filled_size = Decimal(str(filled_size))
+                    except Exception:
+                        pass
 
             # Handle order result
             return await self._handle_order_result(order_result)
@@ -379,8 +388,9 @@ class TradingBot:
                     
                     # Force API query to get accurate filled amount with retry
                     self.order_filled_amount = 0.0
+                    requested_order_id = str(order_id)
                     for api_retry in range(3):
-                        order_info = await self.exchange_client.get_order_info(order_id)
+                        order_info = await self.exchange_client.get_order_info(requested_order_id)
                         if order_info and order_info.filled_size > 0:
                             self.order_filled_amount = order_info.filled_size
                             self.logger.log(f"[OPEN] [{order_id}] API query result (attempt {api_retry + 1}): filled_size={self.order_filled_amount}", "INFO")
@@ -393,6 +403,13 @@ class TradingBot:
                     if self.order_filled_amount == 0:
                         self.order_filled_amount = self.exchange_client.current_order.filled_size
                         self.logger.log(f"[OPEN] [{order_id}] API query failed after 3 attempts, using WebSocket data: filled_size={self.order_filled_amount}", "WARNING")
+                    # If WS 也為 0，但輪詢期間看過部分成交，使用快取救援
+                    try:
+                        if Decimal(str(self.order_filled_amount)) == 0 and self.last_polled_filled_size > 0:
+                            self.order_filled_amount = self.last_polled_filled_size
+                            self.logger.log(f"[OPEN] [{order_id}] Using cached partial fill from polling: filled_size={self.order_filled_amount}", "WARNING")
+                    except Exception:
+                        pass
                     
                     if self.order_filled_amount > 0:
                         self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
