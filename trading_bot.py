@@ -291,7 +291,8 @@ class TradingBot:
                 close_order_result = await self.exchange_client.place_market_order(
                     self.config.contract_id,
                     filled_quantity,  # ✅ Use actual filled quantity
-                    self.config.close_order_side
+                    self.config.close_order_side,
+                    reduce_only=True  # ✅ Boost mode is for closing, should be reduce-only
                 )
             else:
                 self.last_open_order_time = time.time()
@@ -555,18 +556,23 @@ class TradingBot:
                                 self.logger.log(f"[CLOSE] CRITICAL: Failed to place partial fill close order after {max_retries} attempts!", "ERROR")
                                 self.logger.log(f"[CLOSE] CRITICAL: Partial position={self.order_filled_amount} at {filled_price} has NO close order!", "ERROR")
                                 # Fallback: use market order to immediately reduce the imbalance
-                                try:
-                                    market_result = await self.exchange_client.place_market_order(
-                                        self.config.contract_id,
-                                        self.order_filled_amount,
-                                        close_side
-                                    )
-                                    if market_result and market_result.success:
-                                        self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {self.order_filled_amount}", "WARNING")
-                                    else:
-                                        self.logger.log(f"[CLOSE] ❌ Fallback market close failed", "ERROR")
-                                except Exception as me:
-                                    self.logger.log(f"[CLOSE] Error during fallback market close: {me}", "ERROR")
+                                # Validate quantity before placing market order
+                                if self.order_filled_amount <= 0:
+                                    self.logger.log(f"[CLOSE] ⚠️ Skip market order fallback: order_filled_amount={self.order_filled_amount} is zero or negative", "WARNING")
+                                else:
+                                    try:
+                                        market_result = await self.exchange_client.place_market_order(
+                                            self.config.contract_id,
+                                            self.order_filled_amount,
+                                            close_side,
+                                            reduce_only=True  # ✅ Ensure market order is reduce-only to avoid opening new position
+                                        )
+                                        if market_result and market_result.success:
+                                            self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {self.order_filled_amount}", "WARNING")
+                                        else:
+                                            self.logger.log(f"[CLOSE] ❌ Fallback market close failed", "ERROR")
+                                    except Exception as me:
+                                        self.logger.log(f"[CLOSE] Error during fallback market close: {me}", "ERROR")
 
                 self.last_open_order_time = time.time()
                 if close_order_result and not close_order_result.success:
@@ -741,11 +747,17 @@ class TradingBot:
 
             self.logger.log("[RECONCILE] ❌ Failed to place top-up close order after retries", "ERROR")
             # Fallback to market order to quickly resolve imbalance
+            # Validate quantity before placing market order
+            if deficit <= 0:
+                self.logger.log(f"[RECONCILE] ⚠️ Skip market order fallback: deficit={deficit} is zero or negative", "WARNING")
+                return False
+            
             try:
                 market_result = await self.exchange_client.place_market_order(
                     self.config.contract_id,
                     deficit,
-                    close_side
+                    close_side,
+                    reduce_only=True  # ✅ Ensure market order is reduce-only to avoid opening new position
                 )
                 if market_result and market_result.success:
                     self.logger.log(f"[RECONCILE] ✅ Fallback market close succeeded for deficit {deficit}", "WARNING")

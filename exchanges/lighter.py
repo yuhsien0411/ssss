@@ -532,8 +532,23 @@ class LighterClient(BaseExchangeClient):
                 error_message=str(e)
             )
 
-    async def place_market_order(self, contract_id: str, quantity: Decimal, side: str) -> OrderResult:
-        """Place a market order with Lighter using official SDK with improved slippage protection."""
+    async def place_market_order(self, contract_id: str, quantity: Decimal, side: str, reduce_only: bool = False) -> OrderResult:
+        """Place a market order with Lighter using official SDK with improved slippage protection.
+        
+        Args:
+            contract_id: Market index
+            quantity: Order quantity
+            side: 'buy' or 'sell'
+            reduce_only: If True, order will only reduce existing position (default: False)
+        """
+        # Validate quantity
+        if quantity <= 0:
+            return OrderResult(
+                success=False,
+                order_id="",
+                error_message=f"Invalid quantity: {quantity} (must be > 0)"
+            )
+        
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
@@ -564,7 +579,7 @@ class LighterClient(BaseExchangeClient):
             base_amount = int(quantity * base_amount_multiplier)
             
             self.logger.log(f"Placing market order: side={side}, quantity={quantity}, "
-                           f"base_amount={base_amount}, market_index={self.config.contract_id}", "INFO")
+                           f"base_amount={base_amount}, reduce_only={reduce_only}, market_index={self.config.contract_id}", "INFO")
 
             # Use the official SDK's limited slippage method for better price protection
             tx, tx_hash, error = await self.lighter_client.create_market_order_limited_slippage(
@@ -572,7 +587,8 @@ class LighterClient(BaseExchangeClient):
                 client_order_index=client_order_index,
                 base_amount=base_amount,
                 max_slippage=0.02,  # 2% max slippage
-                is_ask=is_ask
+                is_ask=is_ask,
+                reduce_only=reduce_only  # ✅ Pass reduce_only parameter
             )
 
             if error is not None:
