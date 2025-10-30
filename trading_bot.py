@@ -603,7 +603,8 @@ class TradingBot:
                 if (getattr(o, 'side', None) == self.config.close_order_side) or (isinstance(o, dict) and o.get('side') == self.config.close_order_side)
             )
 
-            close_side = self.config.close_order_side
+            # Determine true close side by current position sign
+            close_side = 'sell' if position_amt > 0 else 'buy'
             required_close = abs(position_amt)
             if active_close_amount >= required_close:
                 return False
@@ -621,19 +622,16 @@ class TradingBot:
                 self.logger.log(f"[RECONCILE] Skip duplicate within 5s window for {deficit_signature}", "INFO")
                 return False
 
-            # Use opponent best price × TP (ask for sell, bid for buy)
-            try:
-                api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
-            except Exception:
-                api_bid, api_ask = None, None
-            if close_side == 'sell':
-                base_price = api_ask if api_ask else await self.exchange_client.get_order_price('sell')
-                close_price = base_price * (Decimal('1') + self.config.take_profit/100)
-            else:
-                base_price = api_bid if api_bid else await self.exchange_client.get_order_price('buy')
-                close_price = base_price * (Decimal('1') - self.config.take_profit/100)
+            # Define pricing function: attempt k in [1..5]
+            #   sell: price_k = bid1 * (1 - k*tp%)
+            #   buy:  price_k = ask1 * (1 + k*tp%)
+            def _reconcile_price_for_attempt(side: str, k: int, bid: Decimal, ask: Decimal, tp_pct: Decimal) -> Decimal:
+                if side == 'sell':
+                    return bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
+                return ask * (Decimal('1') + (tp_pct/100) * Decimal(k))
 
-            self.logger.log(f"[RECONCILE] Position={position_amt}, ActiveClose={active_close_amount} → Deficit={deficit}. Placing RO+PO close at {close_price}", "WARNING")
+            # Pre-log high-level action
+            self.logger.log(f"[RECONCILE] Position={position_amt}, ActiveClose={active_close_amount} → Deficit={deficit}.", "WARNING")
 
             # Skip if a similar close already exists (API may have lagged earlier)
             try:
@@ -664,9 +662,22 @@ class TradingBot:
             except Exception:
                 pass
 
-            # Retry logic with micro-adjust to satisfy PO
-            max_retries = 3
-            for retry in range(max_retries):
+            # Retry logic up to 5 attempts using k*tp% pricing against opponent best
+            max_retries = 5
+            for attempt_idx in range(1, max_retries + 1):
+                # Refresh BBO each attempt
+                try:
+                    api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                except Exception:
+                    api_bid, api_ask = None, None
+                if api_bid is None:
+                    api_bid = await self.exchange_client.get_order_price('buy')
+                if api_ask is None:
+                    api_ask = await self.exchange_client.get_order_price('sell')
+
+                close_price = _reconcile_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
+                self.logger.log(f"[RECONCILE] Attempt {attempt_idx}/{max_retries} RO+PO: {deficit} @ {close_price}", "INFO")
+
                 result = await self.exchange_client.place_close_order(
                     self.config.contract_id,
                     deficit,
@@ -677,7 +688,7 @@ class TradingBot:
                     await asyncio.sleep(1)
 
                 if result.success:
-                    self.logger.log(f"[RECONCILE] ✅ Placed top-up close order {deficit} on attempt {retry+1}", "INFO")
+                    self.logger.log(f"[RECONCILE] ✅ Placed top-up close order {deficit} on attempt {attempt_idx}", "INFO")
                     # Verify presence to avoid false success due to API lag
                     try:
                         await asyncio.sleep(2)
@@ -691,24 +702,18 @@ class TradingBot:
                             ) for o in verify_orders
                         )
                         if exists:
-                            # record signature to prevent rapid duplicate in case API-active-orders lag
                             self._last_reconcile_signature = deficit_signature
                             self._last_reconcile_time = time.time()
                             return True
                         else:
                             self.logger.log("[RECONCILE] Verification could not find the new TP; retrying placement", "WARNING")
-                            # fall through to retry by continuing the loop
-                            result.success = False
+                            # continue to next attempt
                     except Exception:
-                        # If verification fails, still record signature to avoid spamming
                         self._last_reconcile_signature = deficit_signature
                         self._last_reconcile_time = time.time()
                         return True
                 else:
-                    if close_side == 'sell':
-                        close_price = close_price * Decimal('1.0001')
-                    else:
-                        close_price = close_price * Decimal('0.9999')
+                    self.logger.log(f"[RECONCILE] Failed attempt {attempt_idx}/{max_retries}: {getattr(result, 'error_message', 'unknown')}", "WARNING")
                     await asyncio.sleep(1)
 
             self.logger.log("[RECONCILE] ❌ Failed to place top-up close order after retries", "ERROR")
