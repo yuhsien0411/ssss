@@ -255,7 +255,7 @@ class TradingBot:
                     # Update order_result status
                     order_result.status = 'FILLED'
                     break
-                elif current_status in ['CANCELED', 'REJECTED']:
+                elif current_status in ['CANCELED', 'REJECTED', 'CANCELED-POST-ONLY']:
                     self.logger.log(f"[OPEN] [{order_id}] Order {current_status}", "WARNING")
                     break
                 else:
@@ -375,11 +375,10 @@ class TradingBot:
             if self.config.exchange == "lighter":
                 cancel_result = await self.exchange_client.cancel_order(order_id)
                 start_time = time.time()
-                while (time.time() - start_time < 10 and self.exchange_client.current_order.status != 'CANCELED' and
-                        self.exchange_client.current_order.status != 'FILLED'):
+                while (time.time() - start_time < 10 and self.exchange_client.current_order.status not in ['CANCELED', 'FILLED', 'CANCELED-POST-ONLY']):
                     await asyncio.sleep(0.1)
 
-                if self.exchange_client.current_order.status not in ['CANCELED', 'FILLED']:
+                if self.exchange_client.current_order.status not in ['CANCELED', 'FILLED', 'CANCELED-POST-ONLY']:
                     raise Exception(f"[OPEN] Error cancelling order: {self.exchange_client.current_order.status}")
                 else:
                     # ⚠️ WebSocket's filled_size may be inaccurate, force API query
