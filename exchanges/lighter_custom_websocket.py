@@ -175,21 +175,19 @@ class LighterCustomWebSocketManager:
             raise
 
     def get_best_levels(self) -> Tuple[Tuple[Optional[float], Optional[float]], Tuple[Optional[float], Optional[float]]]:
-        """Get the best bid and ask levels with sufficient size for our order (~$5000)."""
+        """Get the top-of-book best bid and ask without any size threshold."""
         try:
-            # Get all bid levels with sufficient size
-            bid_levels = [(price, size) for price, size in self.order_book["bids"].items()
-                          if size * price >= 40000]
+            if not self.order_book["bids"] or not self.order_book["asks"]:
+                return (None, None), (None, None)
 
-            # Get all ask levels with sufficient size
-            ask_levels = [(price, size) for price, size in self.order_book["asks"].items()
-                          if size * price >= 40000]
+            # Best bid: highest price in bids; Best ask: lowest price in asks
+            best_bid_price = max(self.order_book["bids"].keys())
+            best_ask_price = min(self.order_book["asks"].keys())
 
-            # Get best bid (highest price) and best ask (lowest price)
-            best_bid = max(bid_levels) if bid_levels else (None, None)
-            best_ask = min(ask_levels) if ask_levels else (None, None)
+            best_bid_size = self.order_book["bids"].get(best_bid_price)
+            best_ask_size = self.order_book["asks"].get(best_ask_price)
 
-            return best_bid, best_ask
+            return (best_bid_price, best_bid_size), (best_ask_price, best_ask_size)
         except (ValueError, KeyError) as e:
             self._log(f"Error getting best levels: {e}", "ERROR")
             return (None, None), (None, None)
