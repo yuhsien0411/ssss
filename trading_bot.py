@@ -481,12 +481,14 @@ class TradingBot:
                         api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
                     except Exception:
                         api_bid, api_ask = None, None
-                    if close_side == 'sell':
-                        base_bid = api_bid if api_bid else await self.exchange_client.get_order_price('buy')
-                        close_price = base_bid * (1 - self.config.take_profit/100)
-                    else:
-                        base_ask = api_ask if api_ask else await self.exchange_client.get_order_price('sell')
-                        close_price = base_ask * (1 + self.config.take_profit/100)
+                    # Base pricing scheme per attempt k in [1..5]:
+                    #   sell:  price_k = bid1 * (1 - k * tp%)
+                    #   buy:   price_k = ask1 * (1 + k * tp%)
+                    # We'll fetch BBO each attempt to stay current
+                    def _compute_price_for_attempt(side: str, k: int, bid: Decimal, ask: Decimal, tp_pct: Decimal) -> Decimal:
+                        if side == 'sell':
+                            return bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
+                        return ask * (Decimal('1') + (tp_pct/100) * Decimal(k))
                     # Deduplicate: skip if similar close already exists
                     try:
                         active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
@@ -516,11 +518,24 @@ class TradingBot:
                     except Exception:
                         pass
 
-                    self.logger.log(f"[CLOSE] Placing REDUCE-ONLY + POST-ONLY close order: {self.order_filled_amount} @ {close_price}", "INFO")
-                    
-                    # Retry logic for partial fill close order placement
-                    max_retries = 3
-                    for retry in range(max_retries):
+                    # Retry logic for partial fill close order placement (up to 5 attempts with k*tp%)
+                    max_retries = 5
+                    close_order_result = None
+                    for attempt_idx in range(1, max_retries + 1):
+                        # Refresh BBO each attempt
+                        try:
+                            api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                        except Exception:
+                            api_bid, api_ask = None, None
+                        # Fallbacks for missing BBO
+                        if api_bid is None:
+                            api_bid = await self.exchange_client.get_order_price('buy')
+                        if api_ask is None:
+                            api_ask = await self.exchange_client.get_order_price('sell')
+
+                        close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
+                        self.logger.log(f"[CLOSE] Attempt {attempt_idx}/{max_retries} RO+PO: {self.order_filled_amount} @ {close_price}", "INFO")
+
                         close_order_result = await self.exchange_client.place_close_order(
                             self.config.contract_id,
                             self.order_filled_amount,
@@ -531,36 +546,27 @@ class TradingBot:
                             await asyncio.sleep(1)
 
                         if close_order_result.success:
-                            self.logger.log(f"[CLOSE] ✅ Successfully placed REDUCE-ONLY + POST-ONLY partial fill close order on attempt {retry + 1}", "INFO")
+                            self.logger.log(f"[CLOSE] ✅ Successfully placed REDUCE-ONLY + POST-ONLY partial fill close order on attempt {attempt_idx}", "INFO")
                             break
                         else:
-                            self.logger.log(f"[CLOSE] Failed to place partial fill close order (attempt {retry + 1}/{max_retries}): {close_order_result.error_message}", "WARNING")
-                            
-                            if retry < max_retries - 1:
-                                # Adjust close price slightly to avoid Post-Only rejection
-                                if close_side == 'sell':
-                                    close_price = close_price * Decimal('1.0001')  # Increase by 0.01%
-                                else:
-                                    close_price = close_price * Decimal('0.9999')  # Decrease by 0.01%
-                                
-                                self.logger.log(f"[CLOSE] Retrying partial fill close order with adjusted price: {close_price}", "INFO")
-                                await asyncio.sleep(1)
-                    else:
-                        self.logger.log(f"[CLOSE] CRITICAL: Failed to place partial fill close order after {max_retries} attempts!", "ERROR")
-                        self.logger.log(f"[CLOSE] CRITICAL: Partial position={self.order_filled_amount} at {filled_price} has NO close order!", "ERROR")
-                        # Fallback: use market order to immediately reduce the imbalance
-                        try:
-                            market_result = await self.exchange_client.place_market_order(
-                                self.config.contract_id,
-                                self.order_filled_amount,
-                                close_side
-                            )
-                            if market_result and market_result.success:
-                                self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {self.order_filled_amount}", "WARNING")
-                            else:
-                                self.logger.log(f"[CLOSE] ❌ Fallback market close failed", "ERROR")
-                        except Exception as me:
-                            self.logger.log(f"[CLOSE] Error during fallback market close: {me}", "ERROR")
+                            self.logger.log(f"[CLOSE] Failed to place partial fill close order (attempt {attempt_idx}/{max_retries}): {close_order_result.error_message}", "WARNING")
+                            await asyncio.sleep(1)
+                            if attempt_idx == max_retries:
+                                self.logger.log(f"[CLOSE] CRITICAL: Failed to place partial fill close order after {max_retries} attempts!", "ERROR")
+                                self.logger.log(f"[CLOSE] CRITICAL: Partial position={self.order_filled_amount} at {filled_price} has NO close order!", "ERROR")
+                                # Fallback: use market order to immediately reduce the imbalance
+                                try:
+                                    market_result = await self.exchange_client.place_market_order(
+                                        self.config.contract_id,
+                                        self.order_filled_amount,
+                                        close_side
+                                    )
+                                    if market_result and market_result.success:
+                                        self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {self.order_filled_amount}", "WARNING")
+                                    else:
+                                        self.logger.log(f"[CLOSE] ❌ Fallback market close failed", "ERROR")
+                                except Exception as me:
+                                    self.logger.log(f"[CLOSE] Error during fallback market close: {me}", "ERROR")
 
                 self.last_open_order_time = time.time()
                 if close_order_result and not close_order_result.success:
