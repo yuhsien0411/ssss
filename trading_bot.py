@@ -634,24 +634,21 @@ class TradingBot:
             self.logger.log(f"[RECONCILE] Position={position_amt}, ActiveClose={active_close_amount} → Deficit={deficit}.", "WARNING")
 
             # Skip if a similar close already exists (API may have lagged earlier)
+            # Note: We check by size only here, price will be computed per attempt
             try:
                 active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
-                tick = getattr(self.config, 'tick_size', Decimal('0')) or Decimal('0')
                 for o in active_orders:
                     if o.side != close_side:
                         continue
                     size_close_enough = abs(Decimal(o.size) - deficit) <= max(Decimal('0.1'), deficit * Decimal('0.01'))
-                    price_close_enough = (tick > 0 and abs(Decimal(o.price) - close_price) <= tick) or (abs(Decimal(o.price) - close_price) / close_price <= Decimal('0.0005'))
-                    if size_close_enough and price_close_enough:
+                    if size_close_enough:
                         self.logger.log(f"[RECONCILE] Skip: similar TP exists size={o.size} price={o.price}", "INFO")
                         # Re-verify after brief delay to avoid API lag false positives
                         await asyncio.sleep(2)
                         active_orders_2 = await self.exchange_client.get_active_orders(self.config.contract_id)
                         exists_after = any(
                             (ao.side == close_side) and (
-                                abs(Decimal(ao.size) - deficit) <= max(Decimal('0.1'), deficit * Decimal('0.01')) and (
-                                    (tick > 0 and abs(Decimal(ao.price) - close_price) <= tick) or (abs(Decimal(ao.price) - close_price) / close_price <= Decimal('0.0005'))
-                                )
+                                abs(Decimal(ao.size) - deficit) <= max(Decimal('0.1'), deficit * Decimal('0.01'))
                             ) for ao in active_orders_2
                         )
                         if exists_after:
@@ -688,27 +685,45 @@ class TradingBot:
                     await asyncio.sleep(1)
 
                 if result.success:
-                    self.logger.log(f"[RECONCILE] ✅ Placed top-up close order {deficit} on attempt {attempt_idx}", "INFO")
-                    # Verify presence to avoid false success due to API lag
+                    placed_order_id = getattr(result, 'order_id', None)
+                    self.logger.log(f"[RECONCILE] ✅ API returned success for order {deficit} @ {close_price} on attempt {attempt_idx} (order_id={placed_order_id})", "INFO")
+                    # Verify presence using order_id if available, otherwise fallback to size/price match
                     try:
                         await asyncio.sleep(2)
-                        verify_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
-                        tick = getattr(self.config, 'tick_size', Decimal('0')) or Decimal('0')
-                        exists = any(
-                            (o.side == close_side) and (
-                                abs(Decimal(o.size) - deficit) <= max(Decimal('0.1'), deficit * Decimal('0.01')) and (
-                                    (tick > 0 and abs(Decimal(o.price) - close_price) <= tick) or (abs(Decimal(o.price) - close_price) / close_price <= Decimal('0.0005'))
-                                )
-                            ) for o in verify_orders
-                        )
-                        if exists:
-                            self._last_reconcile_signature = deficit_signature
-                            self._last_reconcile_time = time.time()
-                            return True
+                        if placed_order_id:
+                            # Direct verification by order_id
+                            order_info = await self.exchange_client.get_order_info(str(placed_order_id))
+                            if order_info and order_info.status in ['OPEN', 'PARTIALLY_FILLED']:
+                                self.logger.log(f"[RECONCILE] ✅ Verified: order {placed_order_id} exists with status={order_info.status}", "INFO")
+                                self._last_reconcile_signature = deficit_signature
+                                self._last_reconcile_time = time.time()
+                                return True
+                            else:
+                                status_str = order_info.status if order_info else 'NOT_FOUND'
+                                self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} verification failed: status={status_str} (may be canceled immediately)", "WARNING")
+                                # continue to next attempt
                         else:
-                            self.logger.log("[RECONCILE] Verification could not find the new TP; retrying placement", "WARNING")
-                            # continue to next attempt
-                    except Exception:
+                            # Fallback: verify by size/price match if no order_id
+                            verify_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
+                            tick = getattr(self.config, 'tick_size', Decimal('0')) or Decimal('0')
+                            exists = any(
+                                (o.side == close_side) and (
+                                    abs(Decimal(o.size) - deficit) <= max(Decimal('0.1'), deficit * Decimal('0.01')) and (
+                                        (tick > 0 and abs(Decimal(o.price) - close_price) <= tick) or (abs(Decimal(o.price) - close_price) / close_price <= Decimal('0.0005'))
+                                    )
+                                ) for o in verify_orders
+                            )
+                            if exists:
+                                self.logger.log(f"[RECONCILE] ✅ Verified by size/price match", "INFO")
+                                self._last_reconcile_signature = deficit_signature
+                                self._last_reconcile_time = time.time()
+                                return True
+                            else:
+                                self.logger.log("[RECONCILE] ⚠️ Verification could not find the new TP; retrying placement", "WARNING")
+                                # continue to next attempt
+                    except Exception as ve:
+                        self.logger.log(f"[RECONCILE] Exception during verification: {ve}", "WARNING")
+                        # If verification fails, assume success to avoid infinite retry (but record signature)
                         self._last_reconcile_signature = deficit_signature
                         self._last_reconcile_time = time.time()
                         return True
