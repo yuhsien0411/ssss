@@ -386,23 +386,32 @@ class TradingBot:
                     self.logger.log(f"[OPEN] [{order_id}] Order canceled, querying API for accurate filled_size...", "INFO")
                     await asyncio.sleep(0.5)  # Wait for exchange to process
                     
-                    # Force API query to get accurate filled amount with retry
+                    # First: query inactive orders via API to get finalized status & filled size
                     self.order_filled_amount = 0.0
                     requested_order_id = str(order_id)
-                    for api_retry in range(3):
-                        order_info = await self.exchange_client.get_order_info(requested_order_id)
-                        if order_info and order_info.filled_size > 0:
-                            self.order_filled_amount = order_info.filled_size
-                            self.logger.log(f"[OPEN] [{order_id}] API query result (attempt {api_retry + 1}): filled_size={self.order_filled_amount}", "INFO")
-                            break
-                        else:
-                            self.logger.log(f"[OPEN] [{order_id}] API query attempt {api_retry + 1} failed or filled_size=0, retrying...", "WARNING")
-                            await asyncio.sleep(1)  # Wait 1 second before retry
-                    
-                    # If API still fails, try WebSocket data
-                    if self.order_filled_amount == 0:
-                        self.order_filled_amount = self.exchange_client.current_order.filled_size
-                        self.logger.log(f"[OPEN] [{order_id}] API query failed after 3 attempts, using WebSocket data: filled_size={self.order_filled_amount}", "WARNING")
+                    finalized = await self.exchange_client.get_finalized_order_from_api(requested_order_id)
+                    order_info = None
+                    if finalized and finalized.filled_size > 0:
+                        self.order_filled_amount = finalized.filled_size
+                        filled_price = finalized.price
+                        self.logger.log(f"[OPEN] [{order_id}] Finalized via API: status={finalized.status}, filled_size={self.order_filled_amount}", "INFO")
+                    else:
+                        # Fallback: Force API query to get accurate filled amount with retry (current_order)
+                        for api_retry in range(3):
+                            order_info = await self.exchange_client.get_order_info(requested_order_id)
+                            if order_info and order_info.filled_size > 0:
+                                self.order_filled_amount = order_info.filled_size
+                                filled_price = order_info.price
+                                self.logger.log(f"[OPEN] [{order_id}] API query result (attempt {api_retry + 1}): filled_size={self.order_filled_amount}", "INFO")
+                                break
+                            else:
+                                self.logger.log(f"[OPEN] [{order_id}] API query attempt {api_retry + 1} failed or filled_size=0, retrying...", "WARNING")
+                                await asyncio.sleep(1)  # Wait 1 second before retry
+                        
+                        # If API still fails, try WebSocket data
+                        if self.order_filled_amount == 0:
+                            self.order_filled_amount = self.exchange_client.current_order.filled_size
+                            self.logger.log(f"[OPEN] [{order_id}] API query failed after 3 attempts, using WebSocket data: filled_size={self.order_filled_amount}", "WARNING")
                     # If WS 也為 0，但輪詢期間看過部分成交，使用快取救援
                     try:
                         if Decimal(str(self.order_filled_amount)) == 0 and self.last_polled_filled_size > 0:

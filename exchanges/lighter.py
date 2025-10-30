@@ -623,7 +623,7 @@ class LighterClient(BaseExchangeClient):
                     await asyncio.sleep(1)  # Wait longer for nonce refresh
                     continue
                 else:
-                    raise Exception(f"[OPEN] Error placing order: {order_result.error_message}")
+            raise Exception(f"[OPEN] Error placing order: {order_result.error_message}")
             except Exception as e:
                 if 'invalid nonce' in str(e).lower() and attempt < max_retries - 1:
                     self.logger.log(f"[OPEN] Nonce error on attempt {attempt + 1}/{max_retries}, retrying...", "WARNING")
@@ -634,13 +634,13 @@ class LighterClient(BaseExchangeClient):
 
         # Simplified - don't wait for order to fill, just return success
         # The order will be monitored by WebSocket and trading bot logic
-        return OrderResult(
-            success=True,
-            order_id=order_result.order_id,
-            side=direction,
-            size=quantity,
-            price=order_price,
-            status='OPEN'
+            return OrderResult(
+                success=True,
+                order_id=order_result.order_id,
+                side=direction,
+                size=quantity,
+                price=order_price,
+                status='OPEN'
         )
 
     async def _get_active_close_orders(self, contract_id: str) -> int:
@@ -698,8 +698,8 @@ class LighterClient(BaseExchangeClient):
                     error_message=error
                 )
 
-            # Wait for order to be placed (reduced sleep time)
-            await asyncio.sleep(0.5)
+            # Wait for order to be placed
+            await asyncio.sleep(1)
             
             return OrderResult(
                 success=True,
@@ -731,7 +731,7 @@ class LighterClient(BaseExchangeClient):
             if order_book.bids and len(order_book.bids) > 0:
                 best_bid_api = Decimal(order_book.bids[0].price)
                 self.logger.log(f"API Best Bid: {best_bid_api} (amount: {order_book.bids[0].remaining_base_amount})", "INFO")
-            else:
+        else:
                 best_bid_api = None
                 
             if order_book.asks and len(order_book.asks) > 0:
@@ -744,7 +744,7 @@ class LighterClient(BaseExchangeClient):
         except Exception as e:
             self.logger.log(f"Error fetching order book from API: {e}", "ERROR")
             return None, None, None
-
+    
     async def get_order_price(self, side: str = '') -> Decimal:
         """Get the price of an order with Lighter using official SDK - Conservative pricing."""
         # Try to get order book from official API first
@@ -886,7 +886,7 @@ class LighterClient(BaseExchangeClient):
                 
             except Exception as api_error:
                 self.logger.log(f"[API] Error querying active orders: {api_error}", "ERROR")
-                return None
+            return None
 
         except Exception as e:
             self.logger.log(f"[API] Error getting order info: {e}", "ERROR")
@@ -952,6 +952,79 @@ class LighterClient(BaseExchangeClient):
                 ))
 
         return contract_orders
+
+    async def _fetch_inactive_orders_with_retry(self, cursor: Optional[str] = None, limit: int = 50):
+        """Get inactive (filled/canceled) orders using official SDK, with auth token.
+        Returns the SDK Orders response (contains .orders and .next_cursor).
+        """
+        # Ensure client is initialized
+        if self.lighter_client is None:
+            await self._initialize_lighter_client()
+
+        # Generate auth token for API call
+        auth_token, error = self.lighter_client.create_auth_token_with_expiry()
+        if error is not None:
+            self.logger.log(f"Error creating auth token: {error}", "ERROR")
+            raise ValueError(f"Error creating auth token: {error}")
+
+        order_api = lighter.OrderApi(self.api_client)
+        # account_inactive_orders: list historical orders (not active)
+        resp = await order_api.account_inactive_orders(
+            account_index=self.account_index,
+            market_id=self.config.contract_id,
+            auth=auth_token,
+            limit=limit,
+            cursor=cursor
+        )
+        return resp
+
+    async def get_finalized_order_from_api(self, target_id: str, max_pages: int = 2) -> Optional[OrderInfo]:
+        """Find finalized order (FILLED/CANCELED) by client_order_index or order_index using API.
+        Args:
+            target_id: client_order_index (short) preferred; also matches long order_index.
+            max_pages: number of pages to scan from newest to older.
+        Returns:
+            OrderInfo or None if not found.
+        """
+        try:
+            cursor = None
+            pages = 0
+            while pages < max_pages:
+                resp = await self._fetch_inactive_orders_with_retry(cursor=cursor, limit=50)
+                if not resp or not getattr(resp, 'orders', None):
+                    break
+
+                for o in resp.orders:
+                    client_idx = getattr(o, 'client_order_index', None)
+                    order_idx = getattr(o, 'order_index', None)
+                    if (client_idx is not None and str(client_idx) == str(target_id)) or (
+                        order_idx is not None and str(order_idx) == str(target_id)
+                    ):
+                        side = 'sell' if o.is_ask else 'buy'
+                        status = str(o.status).upper()
+                        price = Decimal(o.price)
+                        filled = Decimal(o.filled_base_amount)
+                        remaining = Decimal(o.remaining_base_amount)
+                        return OrderInfo(
+                            order_id=str(order_idx) if order_idx is not None else str(target_id),
+                            side=side,
+                            size=Decimal(o.initial_base_amount),
+                            price=price,
+                            status=status,
+                            filled_size=filled,
+                            remaining_size=remaining,
+                            client_order_index=int(client_idx) if client_idx is not None else None
+                        )
+
+                cursor = getattr(resp, 'next_cursor', None)
+                if not cursor:
+                    break
+                pages += 1
+
+            return None
+        except Exception as e:
+            self.logger.log(f"[API] Error fetching finalized order from API: {e}", "ERROR")
+            return None
 
     @query_retry(reraise=True)
     async def _fetch_positions_with_retry(self) -> List[Dict[str, Any]]:
