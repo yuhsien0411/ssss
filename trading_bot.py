@@ -294,18 +294,39 @@ class TradingBot:
                     close_price = filled_price * (1 - self.config.take_profit/100)
 
                 self.logger.log(f"[CLOSE] Placing close order for filled quantity: {filled_quantity} @ {close_price}", "INFO")
-                close_order_result = await self.exchange_client.place_close_order(
-                    self.config.contract_id,
-                    filled_quantity,  # ✅ Use actual filled quantity instead of config.quantity
-                    close_price,
-                    close_side
-                )
-                if self.config.exchange == "lighter":
-                    await asyncio.sleep(1)
+                
+                # Retry logic for close order placement
+                max_retries = 3
+                for retry in range(max_retries):
+                    close_order_result = await self.exchange_client.place_close_order(
+                        self.config.contract_id,
+                        filled_quantity,  # ✅ Use actual filled quantity instead of config.quantity
+                        close_price,
+                        close_side
+                    )
+                    if self.config.exchange == "lighter":
+                        await asyncio.sleep(1)
 
-                if not close_order_result.success:
-                    self.logger.log(f"[CLOSE] Failed to place close order: {close_order_result.error_message}", "ERROR")
-                    raise Exception(f"[CLOSE] Failed to place close order: {close_order_result.error_message}")
+                    if close_order_result.success:
+                        self.logger.log(f"[CLOSE] Successfully placed close order on attempt {retry + 1}", "INFO")
+                        break
+                    else:
+                        self.logger.log(f"[CLOSE] Failed to place close order (attempt {retry + 1}/{max_retries}): {close_order_result.error_message}", "WARNING")
+                        
+                        if retry < max_retries - 1:
+                            # Adjust close price slightly to avoid Post-Only rejection
+                            if close_side == 'sell':
+                                close_price = close_price * Decimal('1.0001')  # Increase by 0.01%
+                            else:
+                                close_price = close_price * Decimal('0.9999')  # Decrease by 0.01%
+                            
+                            self.logger.log(f"[CLOSE] Retrying with adjusted price: {close_price}", "INFO")
+                            await asyncio.sleep(1)
+                        else:
+                            self.logger.log(f"[CLOSE] CRITICAL: Failed to place close order after {max_retries} attempts!", "ERROR")
+                            self.logger.log(f"[CLOSE] CRITICAL: Position={filled_quantity} at {filled_price} has NO close order!", "ERROR")
+                            # Don't raise exception - continue trading but log the issue
+                            # raise Exception(f"[CLOSE] Failed to place close order: {close_order_result.error_message}")
 
                 return True
 
