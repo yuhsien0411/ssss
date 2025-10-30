@@ -647,10 +647,32 @@ class TradingBot:
 
                 if result.success:
                     self.logger.log(f"[RECONCILE] ✅ Placed top-up close order {deficit} on attempt {retry+1}", "INFO")
-                    # record signature to prevent rapid duplicate in case API-active-orders lag
-                    self._last_reconcile_signature = deficit_signature
-                    self._last_reconcile_time = time.time()
-                    return True
+                    # Verify presence to avoid false success due to API lag
+                    try:
+                        await asyncio.sleep(2)
+                        verify_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
+                        tick = getattr(self.config, 'tick_size', Decimal('0')) or Decimal('0')
+                        exists = any(
+                            (o.side == close_side) and (
+                                abs(Decimal(o.size) - deficit) <= max(Decimal('0.1'), deficit * Decimal('0.01')) and (
+                                    (tick > 0 and abs(Decimal(o.price) - close_price) <= tick) or (abs(Decimal(o.price) - close_price) / close_price <= Decimal('0.0005'))
+                                )
+                            ) for o in verify_orders
+                        )
+                        if exists:
+                            # record signature to prevent rapid duplicate in case API-active-orders lag
+                            self._last_reconcile_signature = deficit_signature
+                            self._last_reconcile_time = time.time()
+                            return True
+                        else:
+                            self.logger.log("[RECONCILE] Verification could not find the new TP; retrying placement", "WARNING")
+                            # fall through to retry by continuing the loop
+                            result.success = False
+                    except Exception:
+                        # If verification fails, still record signature to avoid spamming
+                        self._last_reconcile_signature = deficit_signature
+                        self._last_reconcile_time = time.time()
+                        return True
                 else:
                     if close_side == 'sell':
                         close_price = close_price * Decimal('1.0001')
