@@ -718,21 +718,17 @@ class TradingBot:
             next_close_order = picker(self.active_close_orders, key=lambda o: o["price"])
             next_close_price = next_close_order["price"]
 
-            # For Lighter, use get_order_price to get reliable market data (uses API)
+            # For Lighter, prefer WS BBO for grid-step check; fall back to API if WS invalid
             if self.config.exchange == "lighter":
                 try:
-                    # Get reliable price from API-backed method
-                    current_price = await self.exchange_client.get_order_price(self.config.direction)
-                    # Calculate best_bid and best_ask from current_price
-                    if self.config.direction == "buy":
-                        best_ask = current_price  # get_order_price returns best_bid for buy
-                        best_bid = current_price * Decimal('0.999')  # Estimate
-                    else:
-                        best_ask = current_price  # get_order_price returns best_ask for sell
-                        best_bid = current_price * Decimal('0.999')  # Estimate
-                except Exception as e:
-                    self.logger.log(f"[GRID] Failed to get reliable price, falling back to WebSocket: {e}", "WARNING")
                     best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+                except Exception as e:
+                    self.logger.log(f"[GRID] WS BBO unavailable: {e}. Falling back to API.", "WARNING")
+                    api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                    if api_bid and api_ask:
+                        best_bid, best_ask = api_bid, api_ask
+                    else:
+                        raise ValueError("No bid/ask data available from WS or API")
             else:
                 best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
             if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
