@@ -377,15 +377,22 @@ class TradingBot:
                     self.logger.log(f"[OPEN] [{order_id}] Order canceled, querying API for accurate filled_size...", "INFO")
                     await asyncio.sleep(0.5)  # Wait for exchange to process
                     
-                    # Force API query to get accurate filled amount
-                    order_info = await self.exchange_client.get_order_info(order_id)
-                    if order_info:
-                        self.order_filled_amount = order_info.filled_size
-                        self.logger.log(f"[OPEN] [{order_id}] API query result: filled_size={self.order_filled_amount}", "INFO")
-                    else:
-                        # Fallback to WebSocket data if API fails
+                    # Force API query to get accurate filled amount with retry
+                    self.order_filled_amount = 0.0
+                    for api_retry in range(3):
+                        order_info = await self.exchange_client.get_order_info(order_id)
+                        if order_info and order_info.filled_size > 0:
+                            self.order_filled_amount = order_info.filled_size
+                            self.logger.log(f"[OPEN] [{order_id}] API query result (attempt {api_retry + 1}): filled_size={self.order_filled_amount}", "INFO")
+                            break
+                        else:
+                            self.logger.log(f"[OPEN] [{order_id}] API query attempt {api_retry + 1} failed or filled_size=0, retrying...", "WARNING")
+                            await asyncio.sleep(1)  # Wait 1 second before retry
+                    
+                    # If API still fails, try WebSocket data
+                    if self.order_filled_amount == 0:
                         self.order_filled_amount = self.exchange_client.current_order.filled_size
-                        self.logger.log(f"[OPEN] [{order_id}] API query failed, using WebSocket data: filled_size={self.order_filled_amount}", "WARNING")
+                        self.logger.log(f"[OPEN] [{order_id}] API query failed after 3 attempts, using WebSocket data: filled_size={self.order_filled_amount}", "WARNING")
                     
                     if self.order_filled_amount > 0:
                         self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")

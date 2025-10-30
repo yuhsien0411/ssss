@@ -853,11 +853,11 @@ class LighterClient(BaseExchangeClient):
         return OrderResult(success=False, error_message=f"Cancel failed after {max_retries} attempts: {last_error}")
 
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
-        """Get order information from Lighter using WebSocket current_order."""
+        """Get order information from Lighter using API query."""
         try:
             self.logger.log(f"[API] get_order_info called for order_id={order_id}", "INFO")
             
-            # Use current_order from WebSocket updates
+            # First try WebSocket current_order for recent orders
             if hasattr(self, 'current_order') and self.current_order:
                 self.logger.log(f"[API] current_order exists: order_id={self.current_order.order_id}, client_order_index={self.current_order.client_order_index}, status={self.current_order.status}", "INFO")
                 
@@ -869,15 +869,24 @@ class LighterClient(BaseExchangeClient):
                 elif str(self.current_order.order_id) == str(order_id):
                     self.logger.log(f"[API] order_id match! Returning current_order", "INFO")
                     return self.current_order
-                else:
-                    self.logger.log(f"[API] No match: current client_order_index={self.current_order.client_order_index}, order_id={self.current_order.order_id} vs requested={order_id}", "WARNING")
-            else:
-                self.logger.log(f"[API] current_order is None or doesn't exist", "WARNING")
             
-            # If not found in current_order, return None
-            # The order might be too old or not tracked
-            self.logger.log(f"[API] Order not found in current_order, returning None", "WARNING")
-            return None
+            # If not found in current_order, query API for all active orders
+            self.logger.log(f"[API] Order not found in current_order, querying API...", "INFO")
+            try:
+                active_orders = await self.get_active_orders(self.config.contract_id)
+                for order in active_orders:
+                    # Check both order_id and client_order_index
+                    if (str(order.order_id) == str(order_id) or 
+                        (hasattr(order, 'client_order_index') and order.client_order_index and str(order.client_order_index) == str(order_id))):
+                        self.logger.log(f"[API] Found order in API: order_id={order.order_id}, status={order.status}, filled={order.filled_size}", "INFO")
+                        return order
+                
+                self.logger.log(f"[API] Order {order_id} not found in active orders", "WARNING")
+                return None
+                
+            except Exception as api_error:
+                self.logger.log(f"[API] Error querying active orders: {api_error}", "ERROR")
+                return None
 
         except Exception as e:
             self.logger.log(f"[API] Error getting order info: {e}", "ERROR")
@@ -934,11 +943,12 @@ class LighterClient(BaseExchangeClient):
                 contract_orders.append(OrderInfo(
                     order_id=str(order.order_index),
                     side=side,
-                    size=Decimal(order.remaining_base_amount),  # FIXME: This is wrong. Should be size
+                    size=Decimal(order.remaining_base_amount),  # Use remaining size for active orders
                     price=price,
                     status=order.status.upper(),
                     filled_size=Decimal(order.filled_base_amount),
-                    remaining_size=Decimal(order.remaining_base_amount)
+                    remaining_size=Decimal(order.remaining_base_amount),
+                    client_order_index=getattr(order, 'client_order_index', None)  # Add client_order_index
                 ))
 
         return contract_orders

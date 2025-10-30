@@ -66,3 +66,4 @@ echo "3. View logs:"
 echo "   screen -r lighter_yzy_short"
 echo ""
 
+
