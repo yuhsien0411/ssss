@@ -488,11 +488,25 @@ class TradingBot:
                         for o in active_orders:
                             if o.side != close_side:
                                 continue
-                            size_close_enough = abs(Decimal(o.size) - self.order_filled_amount) <= max(Decimal('0.5'), self.order_filled_amount * Decimal('0.02'))
-                            price_close_enough = (tick > 0 and abs(Decimal(o.price) - close_price) <= tick * 3) or (abs(Decimal(o.price) - close_price) / close_price <= Decimal('0.002'))
+                            size_close_enough = abs(Decimal(o.size) - self.order_filled_amount) <= max(Decimal('0.1'), self.order_filled_amount * Decimal('0.01'))
+                            price_close_enough = (tick > 0 and abs(Decimal(o.price) - close_price) <= tick) or (abs(Decimal(o.price) - close_price) / close_price <= Decimal('0.0005'))
                             if size_close_enough and price_close_enough:
                                 self.logger.log(f"[CLOSE] Skip duplicate TP: existing size={o.size} price={o.price}", "INFO")
-                                return
+                                # Re-verify after brief delay to avoid API lag false positives
+                                await asyncio.sleep(2)
+                                active_orders_2 = await self.exchange_client.get_active_orders(self.config.contract_id)
+                                exists_after = any(
+                                    (ao.side == close_side) and (
+                                        abs(Decimal(ao.size) - self.order_filled_amount) <= max(Decimal('0.1'), self.order_filled_amount * Decimal('0.01')) and (
+                                            (tick > 0 and abs(Decimal(ao.price) - close_price) <= tick) or (abs(Decimal(ao.price) - close_price) / close_price <= Decimal('0.0005'))
+                                        )
+                                    ) for ao in active_orders_2
+                                )
+                                if exists_after:
+                                    return
+                                else:
+                                    self.logger.log("[CLOSE] Re-check found no similar TP, will place now", "WARNING")
+                                break
                     except Exception:
                         pass
 
@@ -598,11 +612,25 @@ class TradingBot:
                 for o in active_orders:
                     if o.side != close_side:
                         continue
-                    size_close_enough = abs(Decimal(o.size) - deficit) <= max(Decimal('0.5'), deficit * Decimal('0.02'))
-                    price_close_enough = (tick > 0 and abs(Decimal(o.price) - close_price) <= tick * 3) or (abs(Decimal(o.price) - close_price) / close_price <= Decimal('0.002'))
+                    size_close_enough = abs(Decimal(o.size) - deficit) <= max(Decimal('0.1'), deficit * Decimal('0.01'))
+                    price_close_enough = (tick > 0 and abs(Decimal(o.price) - close_price) <= tick) or (abs(Decimal(o.price) - close_price) / close_price <= Decimal('0.0005'))
                     if size_close_enough and price_close_enough:
                         self.logger.log(f"[RECONCILE] Skip: similar TP exists size={o.size} price={o.price}", "INFO")
-                        return False
+                        # Re-verify after brief delay to avoid API lag false positives
+                        await asyncio.sleep(2)
+                        active_orders_2 = await self.exchange_client.get_active_orders(self.config.contract_id)
+                        exists_after = any(
+                            (ao.side == close_side) and (
+                                abs(Decimal(ao.size) - deficit) <= max(Decimal('0.1'), deficit * Decimal('0.01')) and (
+                                    (tick > 0 and abs(Decimal(ao.price) - close_price) <= tick) or (abs(Decimal(ao.price) - close_price) / close_price <= Decimal('0.0005'))
+                                )
+                            ) for ao in active_orders_2
+                        )
+                        if exists_after:
+                            return False
+                        else:
+                            self.logger.log("[RECONCILE] Re-check found no similar TP, will place now", "WARNING")
+                        break
             except Exception:
                 pass
 
