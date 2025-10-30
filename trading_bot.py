@@ -548,9 +548,22 @@ class TradingBot:
                                 
                                 self.logger.log(f"[CLOSE] Retrying partial fill close order with adjusted price: {close_price}", "INFO")
                                 await asyncio.sleep(1)
+                    else:
+                        self.logger.log(f"[CLOSE] CRITICAL: Failed to place partial fill close order after {max_retries} attempts!", "ERROR")
+                        self.logger.log(f"[CLOSE] CRITICAL: Partial position={self.order_filled_amount} at {filled_price} has NO close order!", "ERROR")
+                        # Fallback: use market order to immediately reduce the imbalance
+                        try:
+                            market_result = await self.exchange_client.place_market_order(
+                                self.config.contract_id,
+                                self.order_filled_amount,
+                                close_side
+                            )
+                            if market_result and market_result.success:
+                                self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {self.order_filled_amount}", "WARNING")
                             else:
-                                self.logger.log(f"[CLOSE] CRITICAL: Failed to place partial fill close order after {max_retries} attempts!", "ERROR")
-                                self.logger.log(f"[CLOSE] CRITICAL: Partial position={self.order_filled_amount} at {filled_price} has NO close order!", "ERROR")
+                                self.logger.log(f"[CLOSE] ❌ Fallback market close failed", "ERROR")
+                        except Exception as me:
+                            self.logger.log(f"[CLOSE] Error during fallback market close: {me}", "ERROR")
 
                 self.last_open_order_time = time.time()
                 if close_order_result and not close_order_result.success:
@@ -701,6 +714,20 @@ class TradingBot:
                     await asyncio.sleep(1)
 
             self.logger.log("[RECONCILE] ❌ Failed to place top-up close order after retries", "ERROR")
+            # Fallback to market order to quickly resolve imbalance
+            try:
+                market_result = await self.exchange_client.place_market_order(
+                    self.config.contract_id,
+                    deficit,
+                    close_side
+                )
+                if market_result and market_result.success:
+                    self.logger.log(f"[RECONCILE] ✅ Fallback market close succeeded for deficit {deficit}", "WARNING")
+                    return True
+                else:
+                    self.logger.log("[RECONCILE] ❌ Fallback market close failed", "ERROR")
+            except Exception as me:
+                self.logger.log(f"[RECONCILE] Error during fallback market close: {me}", "ERROR")
             return False
         except Exception as e:
             self.logger.log(f"[RECONCILE] Error while reconciling close coverage: {e}", "ERROR")
