@@ -305,7 +305,7 @@ class TradingBot:
                         close_side
                     )
                     if self.config.exchange == "lighter":
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(1)
 
                     if close_order_result.success:
                         self.logger.log(f"[CLOSE] Successfully placed close order on attempt {retry + 1}", "INFO")
@@ -439,6 +439,10 @@ class TradingBot:
                 self.logger.log(f"[CLOSE] 🎯 PARTIAL FILL DETECTED: {self.order_filled_amount}/{self.config.quantity} @ {filled_price}", "WARNING")
                 self.logger.log(f"[CLOSE] Creating REDUCE-ONLY + POST-ONLY close order for partial fill", "INFO")
                 close_side = self.config.close_order_side
+                
+                # Initialize close_order_result to avoid UnboundLocalError
+                close_order_result = None
+                
                 if self.config.boost_mode:
                     close_order_result = await self.exchange_client.place_close_order(
                         self.config.contract_id,
@@ -464,7 +468,7 @@ class TradingBot:
                             close_side
                         )
                         if self.config.exchange == "lighter":
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(1)
 
                         if close_order_result.success:
                             self.logger.log(f"[CLOSE] ✅ Successfully placed REDUCE-ONLY + POST-ONLY partial fill close order on attempt {retry + 1}", "INFO")
@@ -486,8 +490,12 @@ class TradingBot:
                                 self.logger.log(f"[CLOSE] CRITICAL: Partial position={self.order_filled_amount} at {filled_price} has NO close order!", "ERROR")
 
                 self.last_open_order_time = time.time()
-                if not close_order_result.success:
+                if close_order_result and not close_order_result.success:
                     self.logger.log(f"[CLOSE] Failed to place partial fill close order: {close_order_result.error_message}", "ERROR")
+                elif close_order_result and close_order_result.success:
+                    self.logger.log(f"[CLOSE] ✅ Partial fill close order placed successfully!", "INFO")
+                else:
+                    self.logger.log(f"[CLOSE] ❌ CRITICAL: close_order_result is None!", "ERROR")
 
             return True
 
