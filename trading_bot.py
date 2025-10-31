@@ -155,9 +155,9 @@ class TradingBot:
                         if filled_size > 0:
                             self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                             f"{filled_size} filled / {message.get('size')} @ {message.get('price')}", "INFO")
-                        else:
-                            self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                            f"{message.get('size')} @ {message.get('price')}", "INFO")
+                    else:
+                        self.logger.log(f"[{order_type}] [{order_id}] {status} "
+                                        f"{message.get('size')} @ {message.get('price')}", "INFO")
                 elif status == "PARTIALLY_FILLED":
                     self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                     f"{filled_size} @ {message.get('price')}", "INFO")
@@ -187,7 +187,7 @@ class TradingBot:
                 return 5  # Wait 5 seconds if position is too large
         
         # Minimal wait time for normal cases
-        return 0
+            return 0
 
     async def _place_and_monitor_open_order(self) -> bool:
         """Place an order and monitor its execution."""
@@ -274,7 +274,7 @@ class TradingBot:
                         if Decimal(str(filled_size)) > 0:
                             self.last_polled_filled_size = Decimal(str(filled_size))
                     except Exception:
-                        pass
+                    pass
 
             # Handle order result
             return await self._handle_order_result(order_result)
@@ -318,14 +318,14 @@ class TradingBot:
                 # Retry logic for close order placement
                 max_retries = 3
                 for retry in range(max_retries):
-                    close_order_result = await self.exchange_client.place_close_order(
-                        self.config.contract_id,
+                close_order_result = await self.exchange_client.place_close_order(
+                    self.config.contract_id,
                         filled_quantity,  # ✅ Use actual filled quantity instead of config.quantity
-                        close_price,
-                        close_side
-                    )
-                    if self.config.exchange == "lighter":
-                        await asyncio.sleep(1)
+                    close_price,
+                    close_side
+                )
+                if self.config.exchange == "lighter":
+                    await asyncio.sleep(1)
 
                     if close_order_result.success:
                         self.logger.log(f"[CLOSE] Successfully placed close order on attempt {retry + 1}", "INFO")
@@ -420,7 +420,7 @@ class TradingBot:
                         
                         # If API still fails, try WebSocket data
                         if self.order_filled_amount == 0:
-                            self.order_filled_amount = self.exchange_client.current_order.filled_size
+                    self.order_filled_amount = self.exchange_client.current_order.filled_size
                             self.logger.log(f"[OPEN] [{order_id}] API query failed after 3 attempts, using WebSocket data: filled_size={self.order_filled_amount}", "WARNING")
                     # If WS 也為 0，但輪詢期間看過部分成交，使用快取救援
                     try:
@@ -462,7 +462,7 @@ class TradingBot:
                             order_info = await self.exchange_client.get_order_info(order_id)
                             self.order_filled_amount = order_info.filled_size
 
-                if self.order_filled_amount > 0:
+            if self.order_filled_amount > 0:
                     self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
                     # Update filled_price to the actual filled price from cancel_result
                     if hasattr(cancel_result, 'price') and cancel_result.price:
@@ -523,7 +523,7 @@ class TradingBot:
                                 )
                                 if exists_after:
                                     return
-                                else:
+                    else:
                                     self.logger.log("[CLOSE] Re-check found no similar TP, will place now", "WARNING")
                                 break
                     except Exception:
@@ -547,14 +547,14 @@ class TradingBot:
                         close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
                         self.logger.log(f"[CLOSE] Attempt {attempt_idx}/{max_retries} RO+PO: {self.order_filled_amount} @ {close_price}", "INFO")
 
-                        close_order_result = await self.exchange_client.place_close_order(
-                            self.config.contract_id,
-                            self.order_filled_amount,
-                            close_price,
-                            close_side
-                        )
-                        if self.config.exchange == "lighter":
-                            await asyncio.sleep(1)
+                    close_order_result = await self.exchange_client.place_close_order(
+                        self.config.contract_id,
+                        self.order_filled_amount,
+                        close_price,
+                        close_side
+                    )
+                    if self.config.exchange == "lighter":
+                        await asyncio.sleep(1)
 
                         if close_order_result.success:
                             self.logger.log(f"[CLOSE] ✅ Successfully placed REDUCE-ONLY + POST-ONLY partial fill close order on attempt {attempt_idx}", "INFO")
@@ -687,6 +687,7 @@ class TradingBot:
 
             # Retry logic up to 5 attempts using k*tp% pricing against opponent best
             max_retries = 5
+            post_only_failures = 0  # Track consecutive POST-ONLY cancellations
             for attempt_idx in range(1, max_retries + 1):
                 # Refresh BBO each attempt
                 try:
@@ -715,18 +716,53 @@ class TradingBot:
                     self.logger.log(f"[RECONCILE] ✅ API returned success for order {deficit} @ {close_price} on attempt {attempt_idx} (order_id={placed_order_id})", "INFO")
                     # Verify presence using order_id if available, otherwise fallback to size/price match
                     try:
-                        await asyncio.sleep(2)
+                        # Wait longer for exchange to process (POST-ONLY cancellations may take time to appear)
+                        await asyncio.sleep(3)
                         if placed_order_id:
                             # Direct verification by order_id
                             order_info = await self.exchange_client.get_order_info(str(placed_order_id))
+                            
+                            # If not found, wait a bit more and try once more (exchange processing delay)
+                            if not order_info:
+                                self.logger.log(f"[RECONCILE] Order {placed_order_id} not found initially, waiting 2s and retrying verification...", "WARNING")
+                                await asyncio.sleep(2)
+                                order_info = await self.exchange_client.get_order_info(str(placed_order_id))
+                            
                             if order_info and order_info.status in ['OPEN', 'PARTIALLY_FILLED']:
                                 self.logger.log(f"[RECONCILE] ✅ Verified: order {placed_order_id} exists with status={order_info.status}", "INFO")
                                 self._last_reconcile_signature = deficit_signature
                                 self._last_reconcile_time = time.time()
                                 return True
+                            elif order_info:
+                                # Order found but not in OPEN/PARTIALLY_FILLED state
+                                status_str = str(order_info.status).upper()
+                                self.logger.log(f"[RECONCILE] Order {placed_order_id} found with status={status_str}", "WARNING")
+                                
+                                # Check if it was canceled due to POST-ONLY violation
+                                if 'POST-ONLY' in status_str or 'POST_ONLY' in status_str:
+                                    post_only_failures += 1
+                                    self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} was CANCELED-POST-ONLY (price too close to market), consecutive failures: {post_only_failures}/3", "WARNING")
+                                    # If 3 consecutive POST-ONLY failures, skip to market order immediately
+                                    if post_only_failures >= 3:
+                                        self.logger.log(f"[RECONCILE] ⚠️ Too many POST-ONLY failures ({post_only_failures}), switching to market order fallback", "WARNING")
+                                        break
+                                elif 'MARGIN' in status_str:
+                                    self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} was CANCELED-MARGIN-NOT-ALLOWED", "WARNING")
+                                    # MARGIN error usually means we can't place the order at all, skip to market order
+                                    self.logger.log(f"[RECONCILE] ⚠️ MARGIN error detected, switching to market order fallback", "WARNING")
+                                    break
+                                else:
+                                    self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} verification failed: status={status_str}", "WARNING")
+                                # continue to next attempt
                             else:
-                                status_str = order_info.status if order_info else 'NOT_FOUND'
-                                self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} verification failed: status={status_str} (may be canceled immediately)", "WARNING")
+                                # Still not found after retry - this is unusual
+                                self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} verification failed: NOT_FOUND even after retry (may be canceled immediately or exchange delay)", "WARNING")
+                                # If this happens multiple times, likely POST-ONLY cancel, count it
+                                if attempt_idx >= 3:
+                                    post_only_failures += 1
+                                    if post_only_failures >= 3:
+                                        self.logger.log(f"[RECONCILE] ⚠️ Multiple orders not found, assuming POST-ONLY cancellations, switching to market order", "WARNING")
+                                        break
                                 # continue to next attempt
                         else:
                             # Fallback: verify by size/price match if no order_id
@@ -886,7 +922,7 @@ class TradingBot:
                     else:
                         raise ValueError("No bid/ask data available from WS or API")
             else:
-                best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+            best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
             if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
                 raise ValueError("No bid/ask data available")
 
@@ -1067,14 +1103,14 @@ class TradingBot:
                         self.logger.log(f"[RECONCILE] Error: {e}", "ERROR")
                         # On error, also skip opening new orders to avoid compounding issues
                         await asyncio.sleep(2)
-                        continue
+                            continue
 
                     # Check if we have capacity for new orders
                     if len(self.active_close_orders) < self.config.max_orders:
                         # Check grid step condition
                         if await self._meet_grid_step_condition():
-                            await self._place_and_monitor_open_order()
-                            self.last_close_orders += 1
+                        await self._place_and_monitor_open_order()
+                        self.last_close_orders += 1
                         else:
                             # Grid step not met, wait a bit before checking again
                             await asyncio.sleep(2)
