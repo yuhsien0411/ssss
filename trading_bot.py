@@ -187,7 +187,7 @@ class TradingBot:
                 return 5  # Wait 5 seconds if position is too large
         
         # Minimal wait time for normal cases
-            return 0
+        return 0
 
     async def _place_and_monitor_open_order(self) -> bool:
         """Place an order and monitor its execution."""
