@@ -695,6 +695,10 @@ class LighterClient(BaseExchangeClient):
 
         try:
             # Use the official SDK's create_order method with POST_ONLY + REDUCE_ONLY
+            # ✅ CRITICAL: All close orders MUST have reduce_only=True to avoid opening new positions
+            reduce_only_flag = True
+            self.logger.log(f"Placing CLOSE order: side={side}, quantity={quantity}, price={price}, reduce_only={reduce_only_flag} (POST-ONLY + REDUCE-ONLY)", "INFO")
+            
             tx, tx_hash, error = await self.lighter_client.create_order(
                 market_index=self.config.contract_id,
                 client_order_index=client_order_index,
@@ -704,7 +708,7 @@ class LighterClient(BaseExchangeClient):
                 order_type=self.lighter_client.ORDER_TYPE_LIMIT,
                 time_in_force=self.lighter_client.ORDER_TIME_IN_FORCE_POST_ONLY,
                 order_expiry=self.lighter_client.DEFAULT_28_DAY_ORDER_EXPIRY,
-                reduce_only=True,  # ✅ REDUCE ONLY for close orders
+                reduce_only=reduce_only_flag,  # ✅ REDUCE ONLY for close orders - CRITICAL
                 trigger_price=0
             )
 

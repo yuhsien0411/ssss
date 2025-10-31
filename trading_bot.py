@@ -130,7 +130,8 @@ class TradingBot:
                     self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                     f"{message.get('size')} @ {message.get('price')}", "INFO")
                     self.logger.log_transaction(order_id, side, message.get('size'), message.get('price'), status)
-                elif status == "CANCELED":
+                elif status == "CANCELED" or status == "CANCELED-MARGIN-NOT-ALLOWED" or status == "CANCELED-POST-ONLY":
+                    # Handle canceled orders (including those with partial fills)
                     if order_type == "OPEN":
                         self.order_filled_amount = filled_size
                         if self.loop is not None:
@@ -140,14 +141,23 @@ class TradingBot:
 
                         if self.order_filled_amount > 0:
                             self.logger.log_transaction(order_id, side, self.order_filled_amount, message.get('price'), status)
+                    
+                    # Handle CLOSE orders with partial fills (important for market order fallback)
+                    if order_type == "CLOSE" and filled_size > 0:
+                        self.logger.log(f"[{order_type}] [{order_id}] ⚠️ {status} with partial fill: {filled_size} @ {message.get('price')}. Order was partially executed before cancellation.", "WARNING")
                             
                     # PATCH
                     if self.config.exchange == "extended":
                         self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                         f"{Decimal(message.get('size')) - filled_size} @ {message.get('price')}", "INFO")
                     else:
-                        self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                        f"{message.get('size')} @ {message.get('price')}", "INFO")
+                        # Log with filled_size if it's > 0 to show partial execution
+                        if filled_size > 0:
+                            self.logger.log(f"[{order_type}] [{order_id}] {status} "
+                                            f"{filled_size} filled / {message.get('size')} @ {message.get('price')}", "INFO")
+                        else:
+                            self.logger.log(f"[{order_type}] [{order_id}] {status} "
+                                            f"{message.get('size')} @ {message.get('price')}", "INFO")
                 elif status == "PARTIALLY_FILLED":
                     self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                     f"{filled_size} @ {message.get('price')}", "INFO")
@@ -765,18 +775,24 @@ class TradingBot:
                     market_order_id = getattr(market_result, 'order_id', None)
                     self.logger.log(f"[RECONCILE] ✅ Fallback market close API returned success for deficit {deficit} (order_id={market_order_id})", "WARNING")
                     
-                    # Wait and check actual order status (market orders may be immediately canceled)
+                    # Wait and check actual order status (market orders may be immediately canceled or partially filled)
                     await asyncio.sleep(2)
                     if market_order_id:
                         try:
                             order_info = await self.exchange_client.get_order_info(str(market_order_id))
-                            if order_info and order_info.status in ['CANCELED', 'CANCELED-MARGIN-NOT-ALLOWED', 'REJECTED']:
-                                self.logger.log(f"[RECONCILE] ❌ CRITICAL: Market order {market_order_id} was {order_info.status}. Position not closed.", "ERROR")
-                                # Record signature with longer timeout to prevent rapid retry (30s instead of 5s)
-                                self._last_reconcile_signature = deficit_signature
-                                self._last_reconcile_time = time.time()
-                                await self.send_notification(f"CRITICAL: Market close order {market_order_id} was {order_info.status}. Position {deficit} remains unclosed.")
-                                return False
+                            if order_info:
+                                filled_amount = getattr(order_info, 'filled_size', Decimal('0'))
+                                if order_info.status in ['CANCELED', 'CANCELED-MARGIN-NOT-ALLOWED', 'REJECTED']:
+                                    if filled_amount > 0:
+                                        # Partially filled before cancellation - check if position decreased
+                                        self.logger.log(f"[RECONCILE] ⚠️ Market order {market_order_id} was {order_info.status} but partially filled {filled_amount}. Checking position...", "WARNING")
+                                    else:
+                                        self.logger.log(f"[RECONCILE] ❌ CRITICAL: Market order {market_order_id} was {order_info.status} with no fill. Position not closed.", "ERROR")
+                                        # Record signature with longer timeout to prevent rapid retry (30s instead of 5s)
+                                        self._last_reconcile_signature = deficit_signature
+                                        self._last_reconcile_time = time.time()
+                                        await self.send_notification(f"CRITICAL: Market close order {market_order_id} was {order_info.status}. Position {deficit} remains unclosed.")
+                                        return False
                         except Exception as e:
                             self.logger.log(f"[RECONCILE] Could not verify market order status: {e}", "WARNING")
                     
@@ -1039,8 +1055,19 @@ class TradingBot:
                             # Give exchange a moment to register the new order
                             await asyncio.sleep(1)
                             continue
+                        # If reconcile failed (returned False), check if there's a critical issue
+                        # If market order fallback also failed, don't open new positions to avoid compounding the problem
+                        position_amt = await self.exchange_client.get_account_positions()
+                        if position_amt != 0:
+                            # There's still an uncovered position - skip opening new orders until resolved
+                            self.logger.log(f"[MAIN] Skipping open order: position={position_amt} still needs coverage", "WARNING")
+                            await asyncio.sleep(2)
+                            continue
                     except Exception as e:
                         self.logger.log(f"[RECONCILE] Error: {e}", "ERROR")
+                        # On error, also skip opening new orders to avoid compounding issues
+                        await asyncio.sleep(2)
+                        continue
 
                     # Check if we have capacity for new orders
                     if len(self.active_close_orders) < self.config.max_orders:
