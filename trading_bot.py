@@ -1097,12 +1097,15 @@ class TradingBot:
                 return False
 
             # Define pricing function: attempt k in [1..5]
-            #   sell: price_k = bid1 * (1 - k*tp%)
-            #   buy:  price_k = ask1 * (1 + k*tp%)
+            # For sell orders: use ask price and add tp% to ensure profit (sell higher)
+            # For buy orders: use bid price and subtract tp% to ensure profit (buy lower)
+            #   sell: price_k = ask1 * (1 + k*tp%)
+            #   buy:  price_k = bid1 * (1 - k*tp%)
             def _reconcile_price_for_attempt(side: str, k: int, bid: Decimal, ask: Decimal, tp_pct: Decimal) -> Decimal:
                 if side == 'sell':
+                    return ask * (Decimal('1') + (tp_pct/100) * Decimal(k))
+                else:  # side == 'buy'
                     return bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
-                return ask * (Decimal('1') + (tp_pct/100) * Decimal(k))
 
             # Pre-log high-level action
             self.logger.log(f"[RECONCILE] Position={position_amt}, ActiveClose={active_close_amount} → Deficit={deficit}.", "WARNING")
@@ -1157,6 +1160,11 @@ class TradingBot:
                     api_ask = await self.exchange_client.get_order_price('sell')
 
                 close_price = _reconcile_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
+                
+                # Round to tick size for lighter exchange
+                if self.config.exchange == "lighter":
+                    close_price = self.exchange_client.round_to_tick(close_price)
+                
                 self.logger.log(f"[RECONCILE] Attempt {attempt_idx}/{max_retries} RO+PO: {deficit} @ {close_price}", "INFO")
 
                 result = await self.exchange_client.place_close_order(
