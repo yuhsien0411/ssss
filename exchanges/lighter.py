@@ -978,14 +978,16 @@ class LighterClient(BaseExchangeClient):
             size = Decimal(order.initial_base_amount)
             price = Decimal(order.price)
 
-            # Only include orders with remaining size > 0
-            if size > 0:
+            # Only include orders with remaining size > 0 AND valid active status
+            order_status = getattr(order, 'status', 'UNKNOWN').upper()
+            # Only include OPEN or PARTIALLY_FILLED orders (exclude CANCELED, FILLED, etc.)
+            if size > 0 and order_status in ['OPEN', 'PARTIALLY_FILLED']:
                 oi = OrderInfo(
                     order_id=str(order.order_index),
                     side=side,
                     size=Decimal(order.remaining_base_amount),  # Use remaining size for active orders
                     price=price,
-                    status=order.status.upper(),
+                    status=order_status,
                     filled_size=Decimal(order.filled_base_amount),
                     remaining_size=Decimal(order.remaining_base_amount),
                     client_order_index=getattr(order, 'client_order_index', None)  # Add client_order_index

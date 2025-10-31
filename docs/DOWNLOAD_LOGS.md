@@ -95,7 +95,7 @@ scp root@your-server-ip:~/bot_output.txt ./
 
 ### PowerShell 命令：
 ```powershell
-.\download_logs.ps1 -Exchange lighter -Ticker YZY -RemoteHost 123.456.789.0 -RemoteUser root
+.\download_logs.ps1 -Exchange lighter -Ticker YZY -RemoteHost 165.232.162.127 -RemoteUser root
 ```
 
 ### Bash 命令：

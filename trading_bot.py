@@ -288,6 +288,9 @@ class TradingBot:
         """Handle the result of an order placement."""
         order_id = order_result.order_id
         filled_price = order_result.price
+        # Reset flag for filled_price tracking
+        if hasattr(self, '_filled_price_set'):
+            delattr(self, '_filled_price_set')
         
         # Use actual filled amount, or order_filled_amount if set
         filled_quantity = self.order_filled_amount if self.order_filled_amount > 0 else self.config.quantity
@@ -308,56 +311,168 @@ class TradingBot:
                 self.last_open_order_time = time.time()
                 # Place close order
                 close_side = self.config.close_order_side
-                if close_side == 'sell':
-                    close_price = filled_price * (1 + self.config.take_profit/100)
-                else:
-                    close_price = filled_price * (1 - self.config.take_profit/100)
-
-                # Log detailed parameters for fully filled orders
+                
+                # Phase 1: Try with fixed price calculation (filled_price * (1 ± tp%)) - 5 attempts
                 self.logger.log(f"[CLOSE] 📊 FULL FILL TP Order Parameters:", "INFO")
                 self.logger.log(f"  - filled_quantity: {filled_quantity}", "INFO")
                 self.logger.log(f"  - filled_price: {filled_price}", "INFO")
                 self.logger.log(f"  - close_side: {close_side}", "INFO")
                 self.logger.log(f"  - take_profit: {self.config.take_profit}%", "INFO")
-                self.logger.log(f"  - calculated close_price: {close_price}", "INFO")
-                self.logger.log(f"[CLOSE] Placing close order for filled quantity: {filled_quantity} @ {close_price}", "INFO")
                 
-                # Retry logic for close order placement
-                max_retries = 3
-                for retry in range(max_retries):
+                # Calculate initial close price using fixed formula
+                if close_side == 'sell':
+                    close_price = filled_price * (1 + self.config.take_profit/100)
+                else:
+                    close_price = filled_price * (1 - self.config.take_profit/100)
+                
+                initial_close_price = close_price
+                self.logger.log(f"  - initial calculated close_price (fixed): {close_price}", "INFO")
+                
+                # Phase 1: Fixed price retries (5 attempts with slight adjustments)
+                phase1_retries = 5
+                close_order_result = None
+                for attempt_idx in range(1, phase1_retries + 1):
+                    self.logger.log(f"[CLOSE] Phase 1 - Attempt {attempt_idx}/{phase1_retries} (fixed price): {filled_quantity} @ {close_price}", "INFO")
+
                     close_order_result = await self.exchange_client.place_close_order(
                         self.config.contract_id,
-                        filled_quantity,  # ✅ Use actual filled quantity instead of config.quantity
+                        filled_quantity,
                         close_price,
                         close_side
                     )
                     if self.config.exchange == "lighter":
                         await asyncio.sleep(1)
-
-                    # Log order result for fully filled orders
-                    if close_order_result:
-                        self.logger.log(f"[CLOSE] 📤 FULL FILL Order result: success={close_order_result.success}, order_id={getattr(close_order_result, 'order_id', 'N/A')}, error={getattr(close_order_result, 'error_message', 'N/A')}", "INFO")
-                    
-                    if close_order_result.success:
-                        self.logger.log(f"[CLOSE] Successfully placed close order on attempt {retry + 1}", "INFO")
-                        break
-                    else:
-                        self.logger.log(f"[CLOSE] Failed to place close order (attempt {retry + 1}/{max_retries}): {close_order_result.error_message}", "WARNING")
                         
-                        if retry < max_retries - 1:
+                    # Verify order actually exists (POST-ONLY orders may be canceled immediately)
+                    if close_order_result and close_order_result.success:
+                        if self.config.exchange == "lighter":
+                            await asyncio.sleep(1)  # Wait for order to be processed
+                            try:
+                                verify_order_id = getattr(close_order_result, 'order_id', None)
+                                if verify_order_id:
+                                    verify_order = await self.exchange_client.get_order_info(str(verify_order_id))
+                                    if verify_order and verify_order.status in ['OPEN', 'PARTIALLY_FILLED']:
+                                        self.logger.log(f"[CLOSE] ✅ Successfully placed FULL FILL close order on Phase 1 attempt {attempt_idx} (verified: status={verify_order.status})", "INFO")
+                                        close_order_result = close_order_result  # Success, exit
+                                        break
+                                    elif verify_order and verify_order.status in ['CANCELED-POST-ONLY', 'CANCELED']:
+                                        self.logger.log(f"[CLOSE] ⚠️ Order {verify_order_id} was {verify_order.status} (POST-ONLY violation)", "WARNING")
+                                        # Treat as failure, continue to next attempt
+                                        close_order_result.success = False
+                                        close_order_result.error_message = f"Order was {verify_order.status} (POST-ONLY violation)"
+                            except Exception as ve:
+                                self.logger.log(f"[CLOSE] ⚠️ Could not verify order, assuming success: {ve}", "WARNING")
+                                # Assume success if verification fails
+                                break
+                        else:
+                            # For non-lighter exchanges, trust the API response
+                            self.logger.log(f"[CLOSE] ✅ Successfully placed FULL FILL close order on Phase 1 attempt {attempt_idx}", "INFO")
+                            break
+                    
+                    # If failed, adjust price slightly for next attempt
+                    if not (close_order_result and close_order_result.success):
+                        if attempt_idx < phase1_retries:
                             # Adjust close price slightly to avoid Post-Only rejection
                             if close_side == 'sell':
                                 close_price = close_price * Decimal('1.0001')  # Increase by 0.01%
                             else:
                                 close_price = close_price * Decimal('0.9999')  # Decrease by 0.01%
-                            
-                            self.logger.log(f"[CLOSE] Retrying with adjusted price: {close_price}", "INFO")
+                            self.logger.log(f"[CLOSE] Retrying with adjusted fixed price: {close_price}", "INFO")
                             await asyncio.sleep(1)
+                
+                # Phase 2: If Phase 1 failed, switch to market-based pricing (ask/bid) - 5 attempts
+                if not (close_order_result and close_order_result.success):
+                    self.logger.log(f"[CLOSE] ⚠️ Phase 1 (fixed price) failed after {phase1_retries} attempts, switching to Phase 2 (market-based pricing)", "WARNING")
+                    
+                    # Define market-based pricing function
+                    def _compute_price_for_attempt(side: str, k: int, bid: Decimal, ask: Decimal, tp_pct: Decimal) -> Decimal:
+                        if side == 'sell':
+                            price = bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
                         else:
-                            self.logger.log(f"[CLOSE] CRITICAL: Failed to place close order after {max_retries} attempts!", "ERROR")
-                            self.logger.log(f"[CLOSE] CRITICAL: Position={filled_quantity} at {filled_price} has NO close order!", "ERROR")
-                            # Don't raise exception - continue trading but log the issue
-                            # raise Exception(f"[CLOSE] Failed to place close order: {close_order_result.error_message}")
+                            price = ask * (Decimal('1') + (tp_pct/100) * Decimal(k))
+                        return price
+                    
+                    phase2_retries = 5
+                    for attempt_idx in range(1, phase2_retries + 1):
+                        # Refresh BBO each attempt to get latest market price
+                        try:
+                            api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                        except Exception:
+                            api_bid, api_ask = None, None
+                        # Fallbacks for missing BBO
+                        if api_bid is None:
+                            api_bid = await self.exchange_client.get_order_price('buy')
+                        if api_ask is None:
+                            api_ask = await self.exchange_client.get_order_price('sell')
+
+                        close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
+                        
+                        self.logger.log(f"[CLOSE] Phase 2 - Attempt {attempt_idx}/{phase2_retries} (market-based): {filled_quantity} @ {close_price} (api_bid={api_bid}, api_ask={api_ask})", "INFO")
+
+                        close_order_result = await self.exchange_client.place_close_order(
+                            self.config.contract_id,
+                            filled_quantity,
+                            close_price,
+                            close_side
+                        )
+                        if self.config.exchange == "lighter":
+                            await asyncio.sleep(1)
+                            
+                        # Verify order actually exists
+                        if close_order_result and close_order_result.success:
+                            if self.config.exchange == "lighter":
+                                await asyncio.sleep(1)  # Wait for order to be processed
+                                try:
+                                    verify_order_id = getattr(close_order_result, 'order_id', None)
+                                    if verify_order_id:
+                                        verify_order = await self.exchange_client.get_order_info(str(verify_order_id))
+                                        if verify_order and verify_order.status in ['OPEN', 'PARTIALLY_FILLED']:
+                                            self.logger.log(f"[CLOSE] ✅ Successfully placed FULL FILL close order on Phase 2 attempt {attempt_idx} (verified: status={verify_order.status})", "INFO")
+                                            break
+                                        elif verify_order and verify_order.status in ['CANCELED-POST-ONLY', 'CANCELED']:
+                                            self.logger.log(f"[CLOSE] ⚠️ Order {verify_order_id} was {verify_order.status} (POST-ONLY violation)", "WARNING")
+                                            close_order_result.success = False
+                                            close_order_result.error_message = f"Order was {verify_order.status} (POST-ONLY violation)"
+                                            if attempt_idx < phase2_retries:
+                                                await asyncio.sleep(1)
+                                                continue
+                                            else:
+                                                break
+                                except Exception as ve:
+                                    self.logger.log(f"[CLOSE] ⚠️ Could not verify order, assuming success: {ve}", "WARNING")
+                                    break
+                            else:
+                                self.logger.log(f"[CLOSE] ✅ Successfully placed FULL FILL close order on Phase 2 attempt {attempt_idx}", "INFO")
+                                break
+                        else:
+                            error_msg = getattr(close_order_result, 'error_message', 'unknown') if close_order_result else 'Order result is None'
+                            self.logger.log(f"[CLOSE] Failed to place FULL FILL close order Phase 2 (attempt {attempt_idx}/{phase2_retries}): {error_msg}", "WARNING")
+                            await asyncio.sleep(1)
+                
+                # Fallback: Market order if both phases failed
+                if not (close_order_result and close_order_result.success):
+                    total_attempts = phase1_retries + phase2_retries
+                    self.logger.log(f"[CLOSE] CRITICAL: Failed to place FULL FILL close order after {total_attempts} attempts (Phase 1: {phase1_retries} + Phase 2: {phase2_retries})!", "ERROR")
+                    self.logger.log(f"[CLOSE] CRITICAL: Position={filled_quantity} at {filled_price} has NO close order!", "ERROR")
+                    self.logger.log(f"[CLOSE] 💔 All POST-ONLY attempts failed. Phase 1 last price: {initial_close_price}, Phase 2 last price: {close_price}, take_profit={self.config.take_profit}%", "ERROR")
+                    # Fallback: use market order to immediately close the position
+                    if filled_quantity <= 0:
+                        self.logger.log(f"[CLOSE] ⚠️ Skip market order fallback: filled_quantity={filled_quantity} is zero or negative", "WARNING")
+                    else:
+                        self.logger.log(f"[CLOSE] 🚨 SWITCHING TO MARKET ORDER FALLBACK for {filled_quantity} @ {close_side}", "WARNING")
+                        try:
+                            market_result = await self.exchange_client.place_market_order(
+                                self.config.contract_id,
+                                filled_quantity,
+                                close_side,
+                                reduce_only=True
+                            )
+                            if market_result and market_result.success:
+                                self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {filled_quantity} (order_id={getattr(market_result, 'order_id', 'N/A')})", "WARNING")
+                            else:
+                                self.logger.log(f"[CLOSE] ❌ Fallback market close failed: {getattr(market_result, 'error_message', 'unknown')}", "ERROR")
+                        except Exception as me:
+                            self.logger.log(f"[CLOSE] Error during fallback market close: {me}", "ERROR")
 
                 return True
 
@@ -432,6 +547,8 @@ class TradingBot:
                     filled_price = final_order_info.price
                 else:
                     filled_price = order_result.price
+                # Mark that filled_price is set
+                self._filled_price_set = True
                 # Skip cancel logic, go directly to close order placement (will be handled below at line 526)
             else:
                 # Cancel the order if it's still open
@@ -497,15 +614,23 @@ class TradingBot:
                                 filled_price = order_info.price
                             else:
                                 filled_price = order_result.price
+                            # Mark that filled_price is set for lighter exchange
+                            self._filled_price_set = True
                             # Continue to close order placement logic (will be handled below at line 526)
                         elif self.order_filled_amount > 0:
                             self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
                             # Update filled_price to the actual filled price from order_info
-                            if order_info and hasattr(order_info, 'price'):
+                            if finalized and hasattr(finalized, 'price'):
+                                filled_price = finalized.price
+                                self.logger.log(f"[OPEN] [{order_id}] Using filled price from finalized order: {filled_price}", "INFO")
+                            elif order_info and hasattr(order_info, 'price'):
                                 filled_price = order_info.price
                                 self.logger.log(f"[OPEN] [{order_id}] Using filled price from order_info: {filled_price}", "INFO")
                             else:
+                                filled_price = order_result.price
                                 self.logger.log(f"[OPEN] [{order_id}] Using order_result price as filled price: {filled_price}", "INFO")
+                            # Mark that filled_price is set for lighter exchange
+                            self._filled_price_set = True
                 else:
                     try:
                         cancel_result = await self.exchange_client.cancel_order(order_id)
@@ -527,16 +652,20 @@ class TradingBot:
                             await asyncio.wait_for(self.order_canceled_event.wait(), timeout=5)
                         except asyncio.TimeoutError:
                             order_info = await self.exchange_client.get_order_info(order_id)
-                            self.order_filled_amount = order_info.filled_size
+                            # Only update order_filled_amount if it's still 0 (don't overwrite cached partial fill)
+                            if self.order_filled_amount == 0:
+                                self.order_filled_amount = order_info.filled_size if order_info else 0
 
-            if self.order_filled_amount > 0:
+            # Only update filled_price if not already set (for lighter exchange, it's set above)
+            if self.order_filled_amount > 0 and not hasattr(self, '_filled_price_set'):
                 self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
-                # Update filled_price to the actual filled price from cancel_result
-                if hasattr(cancel_result, 'price') and cancel_result.price:
+                # Update filled_price to the actual filled price from cancel_result (for non-lighter exchanges)
+                if self.config.exchange != "lighter" and 'cancel_result' in locals() and hasattr(cancel_result, 'price') and cancel_result.price:
                     filled_price = cancel_result.price
                     self.logger.log(f"[OPEN] [{order_id}] Using filled price from cancel_result: {filled_price}", "INFO")
-                else:
-                    self.logger.log(f"[OPEN] [{order_id}] Using order_result price as filled price: {filled_price}", "INFO")
+                elif not hasattr(self, '_filled_price_set'):
+                    # filled_price should already be set above, but log it for reference
+                    self.logger.log(f"[OPEN] [{order_id}] Using filled price: {filled_price}", "INFO")
 
             if self.order_filled_amount > 0:
                 # Check if fully filled or partially filled
@@ -560,15 +689,16 @@ class TradingBot:
                         close_side
                     )
                 else:
-                    # For partial-fill TP: use bid1 * (1 - tp%) for sell; ask1 * (1 + tp%) for buy
-                    try:
-                        api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
-                    except Exception:
-                        api_bid, api_ask = None, None
-                    # Base pricing scheme per attempt k in [1..5]:
-                    #   sell:  price_k = bid1 * (1 - k * tp%)
-                    #   buy:   price_k = ask1 * (1 + k * tp%)
-                    # We'll fetch BBO each attempt to stay current
+                    # Phase 1: Try with fixed price calculation (filled_price * (1 ± tp%)) - 5 attempts
+                    # Calculate initial close price using fixed formula
+                    if close_side == 'sell':
+                        close_price = filled_price * (1 + self.config.take_profit/100)
+                    else:
+                        close_price = filled_price * (1 - self.config.take_profit/100)
+                    
+                    initial_close_price = close_price
+                    
+                    # Define market-based pricing function for Phase 2
                     def _compute_price_for_attempt(side: str, k: int, bid: Decimal, ask: Decimal, tp_pct: Decimal) -> Decimal:
                         if side == 'sell':
                             price = bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
@@ -606,45 +736,18 @@ class TradingBot:
                     except Exception:
                         pass
 
-                    # Retry logic for partial fill close order placement (up to 5 attempts with k*tp%)
-                    max_retries = 5
+                    # Phase 1: Fixed price retries (5 attempts with slight adjustments)
+                    phase1_retries = 5
                     close_order_result = None
-                    for attempt_idx in range(1, max_retries + 1):
-                        # Refresh BBO each attempt
-                        try:
-                            api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
-                        except Exception:
-                            api_bid, api_ask = None, None
-                        # Fallbacks for missing BBO
-                        if api_bid is None:
-                            api_bid_fallback = await self.exchange_client.get_order_price('buy')
-                            self.logger.log(f"[CLOSE] ⚠️ api_bid was None, using fallback: {api_bid_fallback}", "WARNING")
-                            api_bid = api_bid_fallback
-                        if api_ask is None:
-                            api_ask_fallback = await self.exchange_client.get_order_price('sell')
-                            self.logger.log(f"[CLOSE] ⚠️ api_ask was None, using fallback: {api_ask_fallback}", "WARNING")
-                            api_ask = api_ask_fallback
-
-                        close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
-                        
-                        # Log all parameters before placing order
-                        self.logger.log(f"[CLOSE] 📊 TP Order Parameters (Attempt {attempt_idx}/{max_retries}):", "INFO")
-                        self.logger.log(f"  - order_filled_amount: {self.order_filled_amount}", "INFO")
-                        self.logger.log(f"  - filled_price: {filled_price}", "INFO")
-                        self.logger.log(f"  - close_side: {close_side}", "INFO")
-                        self.logger.log(f"  - api_bid: {api_bid}", "INFO")
-                        self.logger.log(f"  - api_ask: {api_ask}", "INFO")
-                        self.logger.log(f"  - take_profit: {self.config.take_profit}%", "INFO")
-                        self.logger.log(f"  - attempt_idx (k): {attempt_idx}", "INFO")
-                        self.logger.log(f"  - calculated close_price: {close_price}", "INFO")
-                        # Calculate price distance from market for reference
-                        if close_side == 'buy':
-                            distance_from_ask = ((Decimal(api_ask) - close_price) / Decimal(api_ask) * 100) if api_ask else None
-                            self.logger.log(f"  - distance from market ask: {distance_from_ask}%", "INFO")
-                        else:
-                            distance_from_bid = ((close_price - Decimal(api_bid)) / Decimal(api_bid) * 100) if api_bid else None
-                            self.logger.log(f"  - distance from market bid: {distance_from_bid}%", "INFO")
-                        self.logger.log(f"[CLOSE] Attempt {attempt_idx}/{max_retries} RO+PO: {self.order_filled_amount} @ {close_price}", "INFO")
+                    self.logger.log(f"[CLOSE] 📊 PARTIAL FILL TP Order Parameters:", "INFO")
+                    self.logger.log(f"  - order_filled_amount: {self.order_filled_amount}", "INFO")
+                    self.logger.log(f"  - filled_price: {filled_price}", "INFO")
+                    self.logger.log(f"  - close_side: {close_side}", "INFO")
+                    self.logger.log(f"  - take_profit: {self.config.take_profit}%", "INFO")
+                    self.logger.log(f"  - initial calculated close_price (fixed): {initial_close_price}", "INFO")
+                    
+                    for attempt_idx in range(1, phase1_retries + 1):
+                        self.logger.log(f"[CLOSE] Phase 1 - Attempt {attempt_idx}/{phase1_retries} (fixed price): {self.order_filled_amount} @ {close_price}", "INFO")
 
                         close_order_result = await self.exchange_client.place_close_order(
                             self.config.contract_id,
@@ -652,44 +755,128 @@ class TradingBot:
                             close_price,
                             close_side
                         )
-                        
-                        # Log order result
-                        if close_order_result:
-                            self.logger.log(f"[CLOSE] 📤 Order placement result: success={close_order_result.success}, order_id={getattr(close_order_result, 'order_id', 'N/A')}, error={getattr(close_order_result, 'error_message', 'N/A')}", "INFO")
-                        else:
-                            self.logger.log(f"[CLOSE] ⚠️ Order placement result is None!", "WARNING")
                         if self.config.exchange == "lighter":
                             await asyncio.sleep(1)
-
-                        if close_order_result.success:
-                            self.logger.log(f"[CLOSE] ✅ Successfully placed REDUCE-ONLY + POST-ONLY partial fill close order on attempt {attempt_idx}", "INFO")
-                            break
-                        else:
-                            self.logger.log(f"[CLOSE] Failed to place partial fill close order (attempt {attempt_idx}/{max_retries}): {close_order_result.error_message}", "WARNING")
-                            await asyncio.sleep(1)
-                            if attempt_idx == max_retries:
-                                self.logger.log(f"[CLOSE] CRITICAL: Failed to place partial fill close order after {max_retries} attempts!", "ERROR")
-                                self.logger.log(f"[CLOSE] CRITICAL: Partial position={self.order_filled_amount} at {filled_price} has NO close order!", "ERROR")
-                                self.logger.log(f"[CLOSE] 💔 All POST-ONLY attempts failed. Last attempt used: close_price={close_price}, api_bid={api_bid}, api_ask={api_ask}, take_profit={self.config.take_profit}%", "ERROR")
-                                # Fallback: use market order to immediately reduce the imbalance
-                                # Validate quantity before placing market order
-                                if self.order_filled_amount <= 0:
-                                    self.logger.log(f"[CLOSE] ⚠️ Skip market order fallback: order_filled_amount={self.order_filled_amount} is zero or negative", "WARNING")
+                            
+                        # Verify order actually exists
+                        if close_order_result and close_order_result.success:
+                            if self.config.exchange == "lighter":
+                                await asyncio.sleep(1)  # Wait for order to be processed
+                                try:
+                                    verify_order_id = getattr(close_order_result, 'order_id', None)
+                                    if verify_order_id:
+                                        verify_order = await self.exchange_client.get_order_info(str(verify_order_id))
+                                        if verify_order and verify_order.status in ['OPEN', 'PARTIALLY_FILLED']:
+                                            self.logger.log(f"[CLOSE] ✅ Successfully placed PARTIAL FILL close order on Phase 1 attempt {attempt_idx} (verified: status={verify_order.status})", "INFO")
+                                            break
+                                        elif verify_order and verify_order.status in ['CANCELED-POST-ONLY', 'CANCELED']:
+                                            self.logger.log(f"[CLOSE] ⚠️ Order {verify_order_id} was {verify_order.status} (POST-ONLY violation)", "WARNING")
+                                            # Treat as failure, continue to next attempt
+                                            close_order_result.success = False
+                                            close_order_result.error_message = f"Order was {verify_order.status} (POST-ONLY violation)"
+                                except Exception as ve:
+                                    self.logger.log(f"[CLOSE] ⚠️ Could not verify order, assuming success: {ve}", "WARNING")
+                                    break
+                            else:
+                                self.logger.log(f"[CLOSE] ✅ Successfully placed PARTIAL FILL close order on Phase 1 attempt {attempt_idx}", "INFO")
+                                break
+                        
+                        # If failed, adjust price slightly for next attempt
+                        if not (close_order_result and close_order_result.success):
+                            if attempt_idx < phase1_retries:
+                                # Adjust close price slightly to avoid Post-Only rejection
+                                if close_side == 'sell':
+                                    close_price = close_price * Decimal('1.0001')  # Increase by 0.01%
                                 else:
-                                    self.logger.log(f"[CLOSE] 🚨 SWITCHING TO MARKET ORDER FALLBACK for {self.order_filled_amount} @ {close_side}", "WARNING")
+                                    close_price = close_price * Decimal('0.9999')  # Decrease by 0.01%
+                                self.logger.log(f"[CLOSE] Retrying with adjusted fixed price: {close_price}", "INFO")
+                                await asyncio.sleep(1)
+                    
+                    # Phase 2: If Phase 1 failed, switch to market-based pricing (ask/bid) - 5 attempts
+                    if not (close_order_result and close_order_result.success):
+                        self.logger.log(f"[CLOSE] ⚠️ Phase 1 (fixed price) failed after {phase1_retries} attempts, switching to Phase 2 (market-based pricing)", "WARNING")
+                        
+                        phase2_retries = 5
+                        for attempt_idx in range(1, phase2_retries + 1):
+                            # Refresh BBO each attempt to get latest market price
+                            try:
+                                api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                            except Exception:
+                                api_bid, api_ask = None, None
+                            # Fallbacks for missing BBO
+                            if api_bid is None:
+                                api_bid = await self.exchange_client.get_order_price('buy')
+                            if api_ask is None:
+                                api_ask = await self.exchange_client.get_order_price('sell')
+
+                            close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
+                            
+                            self.logger.log(f"[CLOSE] Phase 2 - Attempt {attempt_idx}/{phase2_retries} (market-based): {self.order_filled_amount} @ {close_price} (api_bid={api_bid}, api_ask={api_ask})", "INFO")
+
+                            close_order_result = await self.exchange_client.place_close_order(
+                                self.config.contract_id,
+                                self.order_filled_amount,
+                                close_price,
+                                close_side
+                            )
+                            if self.config.exchange == "lighter":
+                                await asyncio.sleep(1)
+                                
+                            # Verify order actually exists
+                            if close_order_result and close_order_result.success:
+                                if self.config.exchange == "lighter":
+                                    await asyncio.sleep(1)  # Wait for order to be processed
                                     try:
-                                        market_result = await self.exchange_client.place_market_order(
-                                            self.config.contract_id,
-                                            self.order_filled_amount,
-                                            close_side,
-                                            reduce_only=True  # ✅ Ensure market order is reduce-only to avoid opening new position
-                                        )
-                                        if market_result and market_result.success:
-                                            self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {self.order_filled_amount} (order_id={getattr(market_result, 'order_id', 'N/A')})", "WARNING")
-                                        else:
-                                            self.logger.log(f"[CLOSE] ❌ Fallback market close failed: {getattr(market_result, 'error_message', 'unknown')}", "ERROR")
-                                    except Exception as me:
-                                        self.logger.log(f"[CLOSE] Error during fallback market close: {me}", "ERROR")
+                                        verify_order_id = getattr(close_order_result, 'order_id', None)
+                                        if verify_order_id:
+                                            verify_order = await self.exchange_client.get_order_info(str(verify_order_id))
+                                            if verify_order and verify_order.status in ['OPEN', 'PARTIALLY_FILLED']:
+                                                self.logger.log(f"[CLOSE] ✅ Successfully placed PARTIAL FILL close order on Phase 2 attempt {attempt_idx} (verified: status={verify_order.status})", "INFO")
+                                                break
+                                            elif verify_order and verify_order.status in ['CANCELED-POST-ONLY', 'CANCELED']:
+                                                self.logger.log(f"[CLOSE] ⚠️ Order {verify_order_id} was {verify_order.status} (POST-ONLY violation)", "WARNING")
+                                                close_order_result.success = False
+                                                close_order_result.error_message = f"Order was {verify_order.status} (POST-ONLY violation)"
+                                                if attempt_idx < phase2_retries:
+                                                    await asyncio.sleep(1)
+                                                    continue
+                                                else:
+                                                    break
+                                    except Exception as ve:
+                                        self.logger.log(f"[CLOSE] ⚠️ Could not verify order, assuming success: {ve}", "WARNING")
+                                        break
+                                else:
+                                    self.logger.log(f"[CLOSE] ✅ Successfully placed PARTIAL FILL close order on Phase 2 attempt {attempt_idx}", "INFO")
+                                    break
+                            else:
+                                error_msg = getattr(close_order_result, 'error_message', 'unknown') if close_order_result else 'Order result is None'
+                                self.logger.log(f"[CLOSE] Failed to place PARTIAL FILL close order Phase 2 (attempt {attempt_idx}/{phase2_retries}): {error_msg}", "WARNING")
+                                await asyncio.sleep(1)
+                    
+                    # Fallback: Market order if both phases failed
+                    if not (close_order_result and close_order_result.success):
+                        total_attempts = phase1_retries + phase2_retries
+                        self.logger.log(f"[CLOSE] CRITICAL: Failed to place PARTIAL FILL close order after {total_attempts} attempts (Phase 1: {phase1_retries} + Phase 2: {phase2_retries})!", "ERROR")
+                        self.logger.log(f"[CLOSE] CRITICAL: Partial position={self.order_filled_amount} at {filled_price} has NO close order!", "ERROR")
+                        self.logger.log(f"[CLOSE] 💔 All POST-ONLY attempts failed. Phase 1 last price: {initial_close_price}, Phase 2 last price: {close_price}, take_profit={self.config.take_profit}%", "ERROR")
+                        # Fallback: use market order to immediately reduce the imbalance
+                        if self.order_filled_amount <= 0:
+                            self.logger.log(f"[CLOSE] ⚠️ Skip market order fallback: order_filled_amount={self.order_filled_amount} is zero or negative", "WARNING")
+                        else:
+                            self.logger.log(f"[CLOSE] 🚨 SWITCHING TO MARKET ORDER FALLBACK for {self.order_filled_amount} @ {close_side}", "WARNING")
+                            try:
+                                market_result = await self.exchange_client.place_market_order(
+                                    self.config.contract_id,
+                                    self.order_filled_amount,
+                                    close_side,
+                                    reduce_only=True
+                                )
+                                if market_result and market_result.success:
+                                    self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {self.order_filled_amount} (order_id={getattr(market_result, 'order_id', 'N/A')})", "WARNING")
+                                else:
+                                    self.logger.log(f"[CLOSE] ❌ Fallback market close failed: {getattr(market_result, 'error_message', 'unknown')}", "ERROR")
+                            except Exception as me:
+                                self.logger.log(f"[CLOSE] Error during fallback market close: {me}", "ERROR")
 
                 self.last_open_order_time = time.time()
                 if close_order_result and not close_order_result.success:
@@ -770,29 +957,38 @@ class TradingBot:
             self.logger.log(f"[RECONCILE] Position={position_amt}, ActiveClose={active_close_amount} → Deficit={deficit}.", "WARNING")
 
             # Skip if a similar close already exists (API may have lagged earlier)
-            # Note: We check by size only here, price will be computed per attempt
+            # Note: We must check both size AND status (OPEN/PARTIALLY_FILLED only)
             try:
                 active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
                 for o in active_orders:
                     if o.side != close_side:
                         continue
+                    # Check order status - only count OPEN or PARTIALLY_FILLED orders
+                    order_status = getattr(o, 'status', 'UNKNOWN').upper()
+                    if order_status not in ['OPEN', 'PARTIALLY_FILLED']:
+                        self.logger.log(f"[RECONCILE] Found order with invalid status: size={o.size} price={o.price} status={order_status}, ignoring", "WARNING")
+                        continue
                     size_close_enough = abs(Decimal(o.size) - deficit) <= max(Decimal('0.1'), deficit * Decimal('0.01'))
                     if size_close_enough:
-                        self.logger.log(f"[RECONCILE] Skip: similar TP exists size={o.size} price={o.price}", "INFO")
+                        self.logger.log(f"[RECONCILE] Found similar TP: size={o.size} price={o.price} status={order_status}", "INFO")
                         # Re-verify after brief delay to avoid API lag false positives
                         await asyncio.sleep(2)
                         active_orders_2 = await self.exchange_client.get_active_orders(self.config.contract_id)
                         exists_after = any(
                             (ao.side == close_side) and (
+                                getattr(ao, 'status', 'UNKNOWN').upper() in ['OPEN', 'PARTIALLY_FILLED']
+                            ) and (
                                 abs(Decimal(ao.size) - deficit) <= max(Decimal('0.1'), deficit * Decimal('0.01'))
                             ) for ao in active_orders_2
                         )
                         if exists_after:
+                            self.logger.log(f"[RECONCILE] ✅ Verified: similar TP still exists after re-check, skipping", "INFO")
                             return False
                         else:
-                            self.logger.log("[RECONCILE] Re-check found no similar TP, will place now", "WARNING")
+                            self.logger.log("[RECONCILE] ⚠️ Re-check found no similar TP (may have been canceled), will place now", "WARNING")
                         break
-            except Exception:
+            except Exception as e:
+                self.logger.log(f"[RECONCILE] Error checking for similar TP: {e}", "WARNING")
                 pass
 
             # Retry logic up to 5 attempts using k*tp% pricing against opponent best
