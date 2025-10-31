@@ -419,10 +419,12 @@ class TradingBot:
                     
                     # Define market-based pricing function
                     def _compute_price_for_attempt(side: str, k: int, bid: Decimal, ask: Decimal, tp_pct: Decimal) -> Decimal:
+                        # For sell orders: use ask price and add tp% to ensure profit (sell higher)
+                        # For buy orders: use bid price and subtract tp% to ensure profit (buy lower)
                         if side == 'sell':
-                            price = bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
-                        else:
                             price = ask * (Decimal('1') + (tp_pct/100) * Decimal(k))
+                        else:  # side == 'buy'
+                            price = bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
                         return price
                     
                     # Get market price once at start (only refresh every 3 attempts)
@@ -750,10 +752,12 @@ class TradingBot:
                     
                     # Define market-based pricing function for Phase 2
                     def _compute_price_for_attempt(side: str, k: int, bid: Decimal, ask: Decimal, tp_pct: Decimal) -> Decimal:
+                        # For sell orders: use ask price and add tp% to ensure profit (sell higher)
+                        # For buy orders: use bid price and subtract tp% to ensure profit (buy lower)
                         if side == 'sell':
-                            price = bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
-                        else:
                             price = ask * (Decimal('1') + (tp_pct/100) * Decimal(k))
+                        else:  # side == 'buy'
+                            price = bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
                         # Log detailed parameters for debugging
                         self.logger.log(f"[CLOSE] 💡 Price calculation params: side={side}, k={k}, bid={bid}, ask={ask}, tp_pct={tp_pct}, calculated_price={price}", "INFO")
                         return price
