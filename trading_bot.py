@@ -155,9 +155,9 @@ class TradingBot:
                         if filled_size > 0:
                             self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                             f"{filled_size} filled / {message.get('size')} @ {message.get('price')}", "INFO")
-                    else:
-                        self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                        f"{message.get('size')} @ {message.get('price')}", "INFO")
+                        else:
+                            self.logger.log(f"[{order_type}] [{order_id}] {status} "
+                                            f"{message.get('size')} @ {message.get('price')}", "INFO")
                 elif status == "PARTIALLY_FILLED":
                     self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                     f"{filled_size} @ {message.get('price')}", "INFO")
@@ -274,7 +274,7 @@ class TradingBot:
                         if Decimal(str(filled_size)) > 0:
                             self.last_polled_filled_size = Decimal(str(filled_size))
                     except Exception:
-                    pass
+                        pass
 
             # Handle order result
             return await self._handle_order_result(order_result)
@@ -318,14 +318,14 @@ class TradingBot:
                 # Retry logic for close order placement
                 max_retries = 3
                 for retry in range(max_retries):
-                close_order_result = await self.exchange_client.place_close_order(
-                    self.config.contract_id,
+                    close_order_result = await self.exchange_client.place_close_order(
+                        self.config.contract_id,
                         filled_quantity,  # ✅ Use actual filled quantity instead of config.quantity
-                    close_price,
-                    close_side
-                )
-                if self.config.exchange == "lighter":
-                    await asyncio.sleep(1)
+                        close_price,
+                        close_side
+                    )
+                    if self.config.exchange == "lighter":
+                        await asyncio.sleep(1)
 
                     if close_order_result.success:
                         self.logger.log(f"[CLOSE] Successfully placed close order on attempt {retry + 1}", "INFO")
@@ -420,7 +420,7 @@ class TradingBot:
                         
                         # If API still fails, try WebSocket data
                         if self.order_filled_amount == 0:
-                    self.order_filled_amount = self.exchange_client.current_order.filled_size
+                            self.order_filled_amount = self.exchange_client.current_order.filled_size
                             self.logger.log(f"[OPEN] [{order_id}] API query failed after 3 attempts, using WebSocket data: filled_size={self.order_filled_amount}", "WARNING")
                     # If WS 也為 0，但輪詢期間看過部分成交，使用快取救援
                     try:
@@ -463,13 +463,13 @@ class TradingBot:
                             self.order_filled_amount = order_info.filled_size
 
             if self.order_filled_amount > 0:
-                    self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
-                    # Update filled_price to the actual filled price from cancel_result
-                    if hasattr(cancel_result, 'price') and cancel_result.price:
-                        filled_price = cancel_result.price
-                        self.logger.log(f"[OPEN] [{order_id}] Using filled price from cancel_result: {filled_price}", "INFO")
-                    else:
-                        self.logger.log(f"[OPEN] [{order_id}] Using order_result price as filled price: {filled_price}", "INFO")
+                self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
+                # Update filled_price to the actual filled price from cancel_result
+                if hasattr(cancel_result, 'price') and cancel_result.price:
+                    filled_price = cancel_result.price
+                    self.logger.log(f"[OPEN] [{order_id}] Using filled price from cancel_result: {filled_price}", "INFO")
+                else:
+                    self.logger.log(f"[OPEN] [{order_id}] Using order_result price as filled price: {filled_price}", "INFO")
 
             if self.order_filled_amount > 0:
                 self.logger.log(f"[CLOSE] 🎯 PARTIAL FILL DETECTED: {self.order_filled_amount}/{self.config.quantity} @ {filled_price}", "WARNING")
@@ -523,9 +523,9 @@ class TradingBot:
                                 )
                                 if exists_after:
                                     return
-                    else:
+                                else:
                                     self.logger.log("[CLOSE] Re-check found no similar TP, will place now", "WARNING")
-                                break
+                                    break
                     except Exception:
                         pass
 
@@ -547,14 +547,14 @@ class TradingBot:
                         close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
                         self.logger.log(f"[CLOSE] Attempt {attempt_idx}/{max_retries} RO+PO: {self.order_filled_amount} @ {close_price}", "INFO")
 
-                    close_order_result = await self.exchange_client.place_close_order(
-                        self.config.contract_id,
-                        self.order_filled_amount,
-                        close_price,
-                        close_side
-                    )
-                    if self.config.exchange == "lighter":
-                        await asyncio.sleep(1)
+                        close_order_result = await self.exchange_client.place_close_order(
+                            self.config.contract_id,
+                            self.order_filled_amount,
+                            close_price,
+                            close_side
+                        )
+                        if self.config.exchange == "lighter":
+                            await asyncio.sleep(1)
 
                         if close_order_result.success:
                             self.logger.log(f"[CLOSE] ✅ Successfully placed REDUCE-ONLY + POST-ONLY partial fill close order on attempt {attempt_idx}", "INFO")
@@ -856,52 +856,6 @@ class TradingBot:
         except Exception as e:
             self.logger.log(f"[RECONCILE] Error while reconciling close coverage: {e}", "ERROR")
             return False
-            try:
-                # Get active orders
-                active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
-
-                # Filter close orders
-                self.active_close_orders = []
-                for order in active_orders:
-                    if order.side == self.config.close_order_side:
-                        self.active_close_orders.append({
-                            'id': order.order_id,
-                            'price': order.price,
-                            'size': order.size
-                        })
-
-                # Get positions
-                position_amt = await self.exchange_client.get_account_positions()
-
-                # Calculate active closing amount
-                active_close_amount = sum(
-                    Decimal(order.get('size', 0))
-                    for order in self.active_close_orders
-                    if isinstance(order, dict)
-                )
-
-                self.logger.log(f"Current Position: {position_amt} | Active closing amount: {active_close_amount} | "
-                                f"Order quantity: {len(self.active_close_orders)}")
-                self.last_log_time = time.time()
-                
-                # Store current position for wait time calculation
-                self.current_position = position_amt
-                
-                # Check for excessive position (more than 20x quantity)
-                max_position = self.config.quantity * 20
-                if abs(position_amt) > max_position:
-                    self.logger.log(f"WARNING: Position too large ({position_amt}), limiting new orders", "WARNING")
-                    mismatch_detected = True  # Stop trading if position is too large
-                else:
-                    mismatch_detected = False
-
-                return mismatch_detected
-
-            except Exception as e:
-                self.logger.log(f"Error in periodic status check: {e}", "ERROR")
-                self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
-
-            print("--------------------------------")
 
     async def _meet_grid_step_condition(self) -> bool:
         """Check if new order meets grid step requirement (matches original logic)."""
@@ -922,7 +876,7 @@ class TradingBot:
                     else:
                         raise ValueError("No bid/ask data available from WS or API")
             else:
-            best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+                best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
             if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
                 raise ValueError("No bid/ask data available")
 
@@ -1103,14 +1057,14 @@ class TradingBot:
                         self.logger.log(f"[RECONCILE] Error: {e}", "ERROR")
                         # On error, also skip opening new orders to avoid compounding issues
                         await asyncio.sleep(2)
-                            continue
+                        continue
 
                     # Check if we have capacity for new orders
                     if len(self.active_close_orders) < self.config.max_orders:
                         # Check grid step condition
                         if await self._meet_grid_step_condition():
-                        await self._place_and_monitor_open_order()
-                        self.last_close_orders += 1
+                            await self._place_and_monitor_open_order()
+                            self.last_close_orders += 1
                         else:
                             # Grid step not met, wait a bit before checking again
                             await asyncio.sleep(2)
