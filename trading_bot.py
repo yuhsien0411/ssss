@@ -313,6 +313,13 @@ class TradingBot:
                 else:
                     close_price = filled_price * (1 - self.config.take_profit/100)
 
+                # Log detailed parameters for fully filled orders
+                self.logger.log(f"[CLOSE] 📊 FULL FILL TP Order Parameters:", "INFO")
+                self.logger.log(f"  - filled_quantity: {filled_quantity}", "INFO")
+                self.logger.log(f"  - filled_price: {filled_price}", "INFO")
+                self.logger.log(f"  - close_side: {close_side}", "INFO")
+                self.logger.log(f"  - take_profit: {self.config.take_profit}%", "INFO")
+                self.logger.log(f"  - calculated close_price: {close_price}", "INFO")
                 self.logger.log(f"[CLOSE] Placing close order for filled quantity: {filled_quantity} @ {close_price}", "INFO")
                 
                 # Retry logic for close order placement
@@ -327,6 +334,10 @@ class TradingBot:
                     if self.config.exchange == "lighter":
                         await asyncio.sleep(1)
 
+                    # Log order result for fully filled orders
+                    if close_order_result:
+                        self.logger.log(f"[CLOSE] 📤 FULL FILL Order result: success={close_order_result.success}, order_id={getattr(close_order_result, 'order_id', 'N/A')}, error={getattr(close_order_result, 'error_message', 'N/A')}", "INFO")
+                    
                     if close_order_result.success:
                         self.logger.log(f"[CLOSE] Successfully placed close order on attempt {retry + 1}", "INFO")
                         break
@@ -560,8 +571,12 @@ class TradingBot:
                     # We'll fetch BBO each attempt to stay current
                     def _compute_price_for_attempt(side: str, k: int, bid: Decimal, ask: Decimal, tp_pct: Decimal) -> Decimal:
                         if side == 'sell':
-                            return bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
-                        return ask * (Decimal('1') + (tp_pct/100) * Decimal(k))
+                            price = bid * (Decimal('1') - (tp_pct/100) * Decimal(k))
+                        else:
+                            price = ask * (Decimal('1') + (tp_pct/100) * Decimal(k))
+                        # Log detailed parameters for debugging
+                        self.logger.log(f"[CLOSE] 💡 Price calculation params: side={side}, k={k}, bid={bid}, ask={ask}, tp_pct={tp_pct}, calculated_price={price}", "INFO")
+                        return price
                     # Deduplicate: skip if similar close already exists
                     try:
                         active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
@@ -602,11 +617,33 @@ class TradingBot:
                             api_bid, api_ask = None, None
                         # Fallbacks for missing BBO
                         if api_bid is None:
-                            api_bid = await self.exchange_client.get_order_price('buy')
+                            api_bid_fallback = await self.exchange_client.get_order_price('buy')
+                            self.logger.log(f"[CLOSE] ⚠️ api_bid was None, using fallback: {api_bid_fallback}", "WARNING")
+                            api_bid = api_bid_fallback
                         if api_ask is None:
-                            api_ask = await self.exchange_client.get_order_price('sell')
+                            api_ask_fallback = await self.exchange_client.get_order_price('sell')
+                            self.logger.log(f"[CLOSE] ⚠️ api_ask was None, using fallback: {api_ask_fallback}", "WARNING")
+                            api_ask = api_ask_fallback
 
                         close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
+                        
+                        # Log all parameters before placing order
+                        self.logger.log(f"[CLOSE] 📊 TP Order Parameters (Attempt {attempt_idx}/{max_retries}):", "INFO")
+                        self.logger.log(f"  - order_filled_amount: {self.order_filled_amount}", "INFO")
+                        self.logger.log(f"  - filled_price: {filled_price}", "INFO")
+                        self.logger.log(f"  - close_side: {close_side}", "INFO")
+                        self.logger.log(f"  - api_bid: {api_bid}", "INFO")
+                        self.logger.log(f"  - api_ask: {api_ask}", "INFO")
+                        self.logger.log(f"  - take_profit: {self.config.take_profit}%", "INFO")
+                        self.logger.log(f"  - attempt_idx (k): {attempt_idx}", "INFO")
+                        self.logger.log(f"  - calculated close_price: {close_price}", "INFO")
+                        # Calculate price distance from market for reference
+                        if close_side == 'buy':
+                            distance_from_ask = ((Decimal(api_ask) - close_price) / Decimal(api_ask) * 100) if api_ask else None
+                            self.logger.log(f"  - distance from market ask: {distance_from_ask}%", "INFO")
+                        else:
+                            distance_from_bid = ((close_price - Decimal(api_bid)) / Decimal(api_bid) * 100) if api_bid else None
+                            self.logger.log(f"  - distance from market bid: {distance_from_bid}%", "INFO")
                         self.logger.log(f"[CLOSE] Attempt {attempt_idx}/{max_retries} RO+PO: {self.order_filled_amount} @ {close_price}", "INFO")
 
                         close_order_result = await self.exchange_client.place_close_order(
@@ -615,6 +652,12 @@ class TradingBot:
                             close_price,
                             close_side
                         )
+                        
+                        # Log order result
+                        if close_order_result:
+                            self.logger.log(f"[CLOSE] 📤 Order placement result: success={close_order_result.success}, order_id={getattr(close_order_result, 'order_id', 'N/A')}, error={getattr(close_order_result, 'error_message', 'N/A')}", "INFO")
+                        else:
+                            self.logger.log(f"[CLOSE] ⚠️ Order placement result is None!", "WARNING")
                         if self.config.exchange == "lighter":
                             await asyncio.sleep(1)
 
@@ -627,11 +670,13 @@ class TradingBot:
                             if attempt_idx == max_retries:
                                 self.logger.log(f"[CLOSE] CRITICAL: Failed to place partial fill close order after {max_retries} attempts!", "ERROR")
                                 self.logger.log(f"[CLOSE] CRITICAL: Partial position={self.order_filled_amount} at {filled_price} has NO close order!", "ERROR")
+                                self.logger.log(f"[CLOSE] 💔 All POST-ONLY attempts failed. Last attempt used: close_price={close_price}, api_bid={api_bid}, api_ask={api_ask}, take_profit={self.config.take_profit}%", "ERROR")
                                 # Fallback: use market order to immediately reduce the imbalance
                                 # Validate quantity before placing market order
                                 if self.order_filled_amount <= 0:
                                     self.logger.log(f"[CLOSE] ⚠️ Skip market order fallback: order_filled_amount={self.order_filled_amount} is zero or negative", "WARNING")
                                 else:
+                                    self.logger.log(f"[CLOSE] 🚨 SWITCHING TO MARKET ORDER FALLBACK for {self.order_filled_amount} @ {close_side}", "WARNING")
                                     try:
                                         market_result = await self.exchange_client.place_market_order(
                                             self.config.contract_id,
@@ -640,9 +685,9 @@ class TradingBot:
                                             reduce_only=True  # ✅ Ensure market order is reduce-only to avoid opening new position
                                         )
                                         if market_result and market_result.success:
-                                            self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {self.order_filled_amount}", "WARNING")
+                                            self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {self.order_filled_amount} (order_id={getattr(market_result, 'order_id', 'N/A')})", "WARNING")
                                         else:
-                                            self.logger.log(f"[CLOSE] ❌ Fallback market close failed", "ERROR")
+                                            self.logger.log(f"[CLOSE] ❌ Fallback market close failed: {getattr(market_result, 'error_message', 'unknown')}", "ERROR")
                                     except Exception as me:
                                         self.logger.log(f"[CLOSE] Error during fallback market close: {me}", "ERROR")
 
