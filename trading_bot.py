@@ -516,11 +516,20 @@ class TradingBot:
                             )
                             if market_result and market_result.success:
                                 self.logger.log(f"[CLOSE] ✅ Fallback market close succeeded for {filled_quantity} (order_id={getattr(market_result, 'order_id', 'N/A')})", "WARNING")
+                                # Clear cached partial fill to avoid reuse
+                                self.last_polled_filled_size = Decimal('0')
                             else:
                                 self.logger.log(f"[CLOSE] ❌ Fallback market close failed: {getattr(market_result, 'error_message', 'unknown')}", "ERROR")
                         except Exception as me:
                             self.logger.log(f"[CLOSE] Error during fallback market close: {me}", "ERROR")
 
+                # Clear cached partial fill after processing FULL FILL (whether successful or not)
+                self.last_polled_filled_size = Decimal('0')
+                
+                # Log success if TP order was placed
+                if close_order_result and close_order_result.success:
+                    self.logger.log(f"[CLOSE] ✅ FULL FILL close order processed successfully!", "INFO")
+                
                 return True
 
         else:
@@ -733,6 +742,33 @@ class TradingBot:
                     self.logger.log(f"[OPEN] [{order_id}] Using filled price: {filled_price}", "INFO")
 
             if self.order_filled_amount > 0:
+                close_side = self.config.close_order_side
+                
+                # Check current position before placing TP order to avoid duplicate processing
+                try:
+                    current_position = await self.exchange_client.get_account_positions()
+                    self.logger.log(f"[CLOSE] Current position before TP: {current_position}, order_filled_amount: {self.order_filled_amount}", "INFO")
+                    
+                    # For sell direction (direction=sell): position should be negative (short), close_side=buy
+                    # For buy direction (direction=buy): position should be positive (long), close_side=sell
+                    # If position doesn't match expected direction, the fill may have already been processed
+                    if close_side == 'buy':  # Closing short position (direction=sell, position should be negative)
+                        if current_position >= 0:
+                            self.logger.log(f"[CLOSE] ⚠️ Position {current_position} >= 0, but trying to close short. This fill may have already been processed. Skipping TP order.", "WARNING")
+                            # Clear cache to avoid reuse
+                            self.last_polled_filled_size = Decimal('0')
+                            self.order_filled_amount = 0
+                            return True
+                    else:  # close_side == 'sell', closing long position (direction=buy, position should be positive)
+                        if current_position <= 0:
+                            self.logger.log(f"[CLOSE] ⚠️ Position {current_position} <= 0, but trying to close long. This fill may have already been processed. Skipping TP order.", "WARNING")
+                            # Clear cache to avoid reuse
+                            self.last_polled_filled_size = Decimal('0')
+                            self.order_filled_amount = 0
+                            return True
+                except Exception as pos_check_error:
+                    self.logger.log(f"[CLOSE] ⚠️ Could not check position, proceeding with TP order: {pos_check_error}", "WARNING")
+                
                 # Check if fully filled or partially filled
                 is_fully_filled_status = abs(Decimal(str(self.order_filled_amount)) - Decimal(str(self.config.quantity))) <= Decimal('0.01')
                 if is_fully_filled_status:
@@ -741,7 +777,6 @@ class TradingBot:
                 else:
                     self.logger.log(f"[CLOSE] 🎯 PARTIAL FILL DETECTED: {self.order_filled_amount}/{self.config.quantity} @ {filled_price}", "WARNING")
                     self.logger.log(f"[CLOSE] Creating REDUCE-ONLY + POST-ONLY close order for partial fill", "INFO")
-                close_side = self.config.close_order_side
                 
                 # Initialize close_order_result to avoid UnboundLocalError
                 close_order_result = None
@@ -997,6 +1032,8 @@ class TradingBot:
                     self.logger.log(f"[CLOSE] Failed to place partial fill close order: {close_order_result.error_message}", "ERROR")
                 elif close_order_result and close_order_result.success:
                     self.logger.log(f"[CLOSE] ✅ Partial fill close order placed successfully!", "INFO")
+                    # Clear cached partial fill to avoid reuse in future orders
+                    self.last_polled_filled_size = Decimal('0')
                 else:
                     self.logger.log(f"[CLOSE] ❌ CRITICAL: close_order_result is None!", "ERROR")
 
