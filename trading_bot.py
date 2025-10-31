@@ -632,11 +632,14 @@ class TradingBot:
                 self.logger.log(f"[RECONCILE] ⚠️ WARNING: Position={position_amt} has opposite sign from direction={self.config.direction}. Expected {'negative' if expected_position_sign < 0 else 'positive'} but got {'positive' if position_amt > 0 else 'negative'}. Will use close_side={close_side} to reduce position to zero.", "WARNING")
             required_close = abs(position_amt)
             if active_close_amount >= required_close:
-                return False
-
+                # Has sufficient orders to cover position - this is good, not a failure
+                self.logger.log(f"[RECONCILE] ✅ Sufficient coverage: Position={position_amt}, ActiveClose={active_close_amount} >= Required={required_close}. Orders are covering position.", "INFO")
+                return False  # Return False but this is success case, not failure
+            
             deficit = (required_close - active_close_amount).quantize(Decimal('0.00000001'))
             if deficit <= 0:
-                return False
+                self.logger.log(f"[RECONCILE] ✅ Sufficient coverage: Position={position_amt}, ActiveClose={active_close_amount}, Deficit={deficit} <= 0. Orders are covering position.", "INFO")
+                return False  # Return False but this is success case, not failure
 
             # Duplicate-suppression: avoid placing the same reconcile twice within a short window
             now_ts = time.time()
@@ -718,16 +721,22 @@ class TradingBot:
                     # Verify presence using order_id if available, otherwise fallback to size/price match
                     try:
                         # Wait longer for exchange to process (POST-ONLY cancellations may take time to appear)
-                        await asyncio.sleep(3)
+                        # Increased wait time to allow exchange to process and update order status
+                        await asyncio.sleep(5)
                         if placed_order_id:
-                            # Direct verification by order_id
-                            order_info = await self.exchange_client.get_order_info(str(placed_order_id))
-                            
-                            # If not found, wait a bit more and try once more (exchange processing delay)
-                            if not order_info:
-                                self.logger.log(f"[RECONCILE] Order {placed_order_id} not found initially, waiting 2s and retrying verification...", "WARNING")
-                                await asyncio.sleep(2)
+                            # Direct verification by order_id with multiple retries
+                            order_info = None
+                            verification_retries = 2
+                            for verify_attempt in range(verification_retries):
                                 order_info = await self.exchange_client.get_order_info(str(placed_order_id))
+                                
+                                if order_info:
+                                    break  # Found order, exit retry loop
+                                
+                                if verify_attempt < verification_retries - 1:
+                                    wait_time = 3 if verify_attempt == 0 else 5  # Progressive wait: 3s then 5s
+                                    self.logger.log(f"[RECONCILE] Order {placed_order_id} not found on attempt {verify_attempt + 1}/{verification_retries}, waiting {wait_time}s...", "WARNING")
+                                    await asyncio.sleep(wait_time)
                             
                             if order_info and order_info.status in ['OPEN', 'PARTIALLY_FILLED']:
                                 self.logger.log(f"[RECONCILE] ✅ Verified: order {placed_order_id} exists with status={order_info.status}", "INFO")
@@ -740,9 +749,9 @@ class TradingBot:
                                 self.logger.log(f"[RECONCILE] Order {placed_order_id} found with status={status_str}", "WARNING")
                                 
                                 # Check if it was canceled due to POST-ONLY violation
-                                if 'POST-ONLY' in status_str or 'POST_ONLY' in status_str:
+                                if 'POST-ONLY' in status_str or 'POST_ONLY' in status_str or 'CANCELED' in status_str:
                                     post_only_failures += 1
-                                    self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} was CANCELED-POST-ONLY (price too close to market), consecutive failures: {post_only_failures}/3", "WARNING")
+                                    self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} was CANCELED (likely POST-ONLY violation), consecutive failures: {post_only_failures}/3", "WARNING")
                                     # If 3 consecutive POST-ONLY failures, skip to market order immediately
                                     if post_only_failures >= 3:
                                         self.logger.log(f"[RECONCILE] ⚠️ Too many POST-ONLY failures ({post_only_failures}), switching to market order fallback", "WARNING")
@@ -756,13 +765,33 @@ class TradingBot:
                                     self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} verification failed: status={status_str}", "WARNING")
                                 # continue to next attempt
                             else:
-                                # Still not found after retry - this is unusual
-                                self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} verification failed: NOT_FOUND even after retry (may be canceled immediately or exchange delay)", "WARNING")
-                                # If this happens multiple times, likely POST-ONLY cancel, count it
-                                if attempt_idx >= 3:
+                                # Still not found after multiple retries - check if position decreased (order may have filled immediately)
+                                current_position = await self.exchange_client.get_account_positions()
+                                position_decreased = abs(current_position) < abs(position_amt)
+                                
+                                if position_decreased:
+                                    # Position decreased even though order not found - order likely filled immediately
+                                    position_change = abs(position_amt) - abs(current_position)
+                                    self.logger.log(f"[RECONCILE] ✅ Order {placed_order_id} not found but position decreased: {position_amt} → {current_position} (filled ~{position_change}), treating as success", "INFO")
+                                    # Update deficit signature with new position for next iteration
+                                    remaining_position = abs(current_position)
+                                    if remaining_position > 0:
+                                        # Still has remaining position, update signature to allow retry for remaining
+                                        self._last_reconcile_signature = f"{close_side}:{remaining_position}"
+                                        self._last_reconcile_time = time.time()
+                                    else:
+                                        # Position fully closed
+                                        self._last_reconcile_signature = deficit_signature
+                                        self._last_reconcile_time = time.time()
+                                    return True  # Treat as success since position decreased
+                                else:
+                                    # Position unchanged - likely POST-ONLY cancel that hasn't appeared in API yet
+                                    self.logger.log(f"[RECONCILE] ⚠️ Order {placed_order_id} verification failed: NOT_FOUND after {verification_retries} attempts (likely canceled immediately by POST-ONLY)", "WARNING")
+                                    # Treat NOT_FOUND as POST-ONLY failure (common when price too close to market)
                                     post_only_failures += 1
+                                    self.logger.log(f"[RECONCILE] ⚠️ Counting NOT_FOUND as POST-ONLY failure, consecutive failures: {post_only_failures}/3", "WARNING")
                                     if post_only_failures >= 3:
-                                        self.logger.log(f"[RECONCILE] ⚠️ Multiple orders not found, assuming POST-ONLY cancellations, switching to market order", "WARNING")
+                                        self.logger.log(f"[RECONCILE] ⚠️ Multiple orders not found ({post_only_failures} consecutive), assuming POST-ONLY cancellations, switching to market order", "WARNING")
                                         break
                                 # continue to next attempt
                         else:
@@ -1041,19 +1070,48 @@ class TradingBot:
                     
                     # Ensure TP coverage first
                     try:
-                        placed_topup = await self._reconcile_close_coverage()
-                        if placed_topup:
-                            # Give exchange a moment to register the new order
-                            await asyncio.sleep(1)
-                            continue
-                        # If reconcile failed (returned False), check if there's a critical issue
-                        # If market order fallback also failed, don't open new positions to avoid compounding the problem
+                        # Check position and active orders BEFORE reconcile to determine if we have coverage
                         position_amt = await self.exchange_client.get_account_positions()
                         if position_amt != 0:
-                            # There's still an uncovered position - skip opening new orders until resolved
-                            self.logger.log(f"[MAIN] Skipping open order: position={position_amt} still needs coverage", "WARNING")
-                            await asyncio.sleep(2)
-                            continue
+                            close_side = 'sell' if position_amt > 0 else 'buy'
+                            active_orders = await self.exchange_client.get_active_orders(self.config.contract_id)
+                            active_close_amount = sum(
+                                Decimal(getattr(o, 'size', 0)) if not isinstance(o, dict) else Decimal(o.get('size', 0))
+                                for o in active_orders
+                                if (getattr(o, 'side', None) == close_side) or (isinstance(o, dict) and o.get('side') == close_side)
+                            )
+                            required_close = abs(position_amt)
+                            has_sufficient_coverage = active_close_amount >= required_close
+                            
+                            # Call reconcile which will handle deficit if needed
+                            placed_topup = await self._reconcile_close_coverage()
+                            if placed_topup:
+                                # Give exchange a moment to register the new order
+                                await asyncio.sleep(1)
+                                continue
+                            
+                            # If reconcile returned False, check if we have sufficient coverage
+                            if has_sufficient_coverage:
+                                # We have enough orders covering the position - this is OK, allow trading to continue
+                                self.logger.log(f"[MAIN] ✅ Position={position_amt} has sufficient coverage (ActiveClose={active_close_amount} >= Required={required_close}), allowing trading to continue", "INFO")
+                                # Continue to check if we can open new orders (don't skip)
+                                # Position tracking will be cleared when position becomes 0
+                            else:
+                                # There's an uncovered position and reconcile failed - skip opening new orders
+                                last_position = getattr(self, '_last_checked_position', None)
+                                position_decreasing = (last_position is not None and abs(position_amt) < abs(last_position))
+                                self._last_checked_position = position_amt
+                                
+                                if position_decreasing:
+                                    self.logger.log(f"[MAIN] Position decreasing: {last_position} → {position_amt}, waiting for orders to fill...", "INFO")
+                                    await asyncio.sleep(3)  # Wait longer when position is actively decreasing
+                                else:
+                                    self.logger.log(f"[MAIN] Skipping open order: position={position_amt} still needs coverage (ActiveClose={active_close_amount} < Required={required_close})", "WARNING")
+                                    await asyncio.sleep(2)
+                                continue
+                        else:
+                            # Position resolved, clear tracking
+                            self._last_checked_position = None
                     except Exception as e:
                         self.logger.log(f"[RECONCILE] Error: {e}", "ERROR")
                         # On error, also skip opening new orders to avoid compounding issues
