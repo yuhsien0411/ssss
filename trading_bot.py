@@ -325,6 +325,11 @@ class TradingBot:
                 else:
                     close_price = filled_price * (1 - self.config.take_profit/100)
                 
+                # Round to tick size for lighter exchange
+                if self.config.exchange == "lighter":
+                    close_price = Decimal(str(close_price))
+                    close_price = self.exchange_client.round_to_tick(close_price)
+                
                 initial_close_price = close_price
                 self.logger.log(f"  - initial calculated close_price (fixed): {close_price}", "INFO")
                 
@@ -343,9 +348,13 @@ class TradingBot:
                 if close_side == 'buy' and api_bid and close_price <= Decimal(str(api_bid)):
                     self.logger.log(f"[CLOSE] ⚠️ Buy price {close_price} <= best bid {api_bid}, adjusting to {api_bid * Decimal('1.0001')}", "WARNING")
                     close_price = api_bid * Decimal('1.0001')  # Set slightly above best bid
+                    if self.config.exchange == "lighter":
+                        close_price = self.exchange_client.round_to_tick(close_price)
                 elif close_side == 'sell' and api_ask and close_price >= Decimal(str(api_ask)):
                     self.logger.log(f"[CLOSE] ⚠️ Sell price {close_price} >= best ask {api_ask}, adjusting to {api_ask * Decimal('0.9999')}", "WARNING")
                     close_price = api_ask * Decimal('0.9999')  # Set slightly below best ask
+                    if self.config.exchange == "lighter":
+                        close_price = self.exchange_client.round_to_tick(close_price)
                 
                 phase1_retries = 5
                 close_order_result = None
@@ -398,6 +407,9 @@ class TradingBot:
                                 close_price = close_price * Decimal('0.9999')  # Decrease by 0.01% (lower sell price)
                             else:
                                 close_price = close_price * Decimal('1.0001')  # Increase by 0.01% (higher buy price)
+                            # Round to tick size for lighter exchange
+                            if self.config.exchange == "lighter":
+                                close_price = self.exchange_client.round_to_tick(close_price)
                             self.logger.log(f"[CLOSE] Retrying with adjusted fixed price: {close_price}", "INFO")
                             await asyncio.sleep(0.3)  # Reduced wait time
                 
@@ -431,6 +443,10 @@ class TradingBot:
                             last_price_refresh = attempt_idx
 
                         close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
+                        
+                        # Round to tick size for lighter exchange
+                        if self.config.exchange == "lighter":
+                            close_price = self.exchange_client.round_to_tick(close_price)
                         
                         self.logger.log(f"[CLOSE] Phase 2 - Attempt {attempt_idx}/{phase2_retries} (market-based): {filled_quantity} @ {close_price} (api_bid={api_bid}, api_ask={api_ask})", "INFO")
 
@@ -725,6 +741,11 @@ class TradingBot:
                     else:
                         close_price = filled_price * (1 - self.config.take_profit/100)
                     
+                    # Round to tick size for lighter exchange
+                    if self.config.exchange == "lighter":
+                        close_price = Decimal(str(close_price))
+                        close_price = self.exchange_client.round_to_tick(close_price)
+                    
                     initial_close_price = close_price
                     
                     # Define market-based pricing function for Phase 2
@@ -780,9 +801,13 @@ class TradingBot:
                     if close_side == 'buy' and api_bid and close_price <= Decimal(str(api_bid)):
                         self.logger.log(f"[CLOSE] ⚠️ Buy price {close_price} <= best bid {api_bid}, adjusting to {api_bid * Decimal('1.0001')}", "WARNING")
                         close_price = api_bid * Decimal('1.0001')  # Set slightly above best bid
+                        if self.config.exchange == "lighter":
+                            close_price = self.exchange_client.round_to_tick(close_price)
                     elif close_side == 'sell' and api_ask and close_price >= Decimal(str(api_ask)):
                         self.logger.log(f"[CLOSE] ⚠️ Sell price {close_price} >= best ask {api_ask}, adjusting to {api_ask * Decimal('0.9999')}", "WARNING")
                         close_price = api_ask * Decimal('0.9999')  # Set slightly below best ask
+                        if self.config.exchange == "lighter":
+                            close_price = self.exchange_client.round_to_tick(close_price)
                     
                     phase1_retries = 5
                     close_order_result = None
@@ -841,6 +866,9 @@ class TradingBot:
                                     close_price = close_price * Decimal('0.9999')  # Decrease by 0.01% (lower sell price)
                                 else:
                                     close_price = close_price * Decimal('1.0001')  # Increase by 0.01% (higher buy price)
+                                # Round to tick size for lighter exchange
+                                if self.config.exchange == "lighter":
+                                    close_price = self.exchange_client.round_to_tick(close_price)
                                 self.logger.log(f"[CLOSE] Retrying with adjusted fixed price: {close_price}", "INFO")
                                 await asyncio.sleep(0.3)  # Reduced wait time
                     
@@ -866,6 +894,10 @@ class TradingBot:
                                 last_price_refresh = attempt_idx
 
                             close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
+                            
+                            # Round to tick size for lighter exchange
+                            if self.config.exchange == "lighter":
+                                close_price = self.exchange_client.round_to_tick(close_price)
                             
                             self.logger.log(f"[CLOSE] Phase 2 - Attempt {attempt_idx}/{phase2_retries} (market-based): {self.order_filled_amount} @ {close_price} (api_bid={api_bid}, api_ask={api_ask})", "INFO")
 
