@@ -527,10 +527,14 @@ class TradingBot:
             new_order_price = await self.exchange_client.get_order_price(self.config.direction)
 
             def should_wait(direction: str, new_order_price: Decimal, order_result_price: Decimal) -> bool:
+                # Only wait if the new price is better than the order price
+                # For buy: wait if new price is lower (better to buy)
+                # For sell: wait if new price is higher (better to sell)
+                # If prices are equal, don't wait (order price is already optimal)
                 if direction == "buy":
-                    return new_order_price <= order_result_price
+                    return new_order_price < order_result_price  # Strict <, not <=
                 elif direction == "sell":
-                    return new_order_price >= order_result_price
+                    return new_order_price > order_result_price  # Strict >, not >=
                 return False
 
             if self.config.exchange == "lighter":
@@ -539,12 +543,21 @@ class TradingBot:
                 order_info = await self.exchange_client.get_order_info(order_id)
                 current_order_status = order_info.status
 
+            # Add timeout mechanism: maximum wait time (e.g., 30 seconds)
+            wait_start_time = time.time()
+            max_wait_time = 30  # Maximum wait time in seconds
+            wait_count = 0
+            max_wait_count = 6  # Maximum 6 waits (6 * 5s = 30s)
+
             while (
                 should_wait(self.config.direction, new_order_price, order_result.price)
                 and current_order_status == "OPEN"
+                and wait_count < max_wait_count
             ):
-                self.logger.log(f"[OPEN] [{order_id}] Waiting for order to be filled @ {order_result.price}", "INFO")
+                self.logger.log(f"[OPEN] [{order_id}] Waiting for order to be filled @ {order_result.price} (wait {wait_count + 1}/{max_wait_count})", "INFO")
                 await asyncio.sleep(5)
+                wait_count += 1
+                
                 if self.config.exchange == "lighter":
                     current_order_status = self.exchange_client.current_order.status
                     # Check if order is fully filled
@@ -567,7 +580,12 @@ class TradingBot:
                                 # Use config.quantity to ensure exact match
                                 self.order_filled_amount = float(self.config.quantity)
                                 break  # Exit loop, order is fully filled
+                
+                # Update new_order_price for next iteration
                 new_order_price = await self.exchange_client.get_order_price(self.config.direction)
+            
+            if wait_count >= max_wait_count and current_order_status == "OPEN":
+                self.logger.log(f"[OPEN] [{order_id}] ⏰ Wait timeout reached ({max_wait_count * 5}s), order still OPEN, will cancel and re-place", "WARNING")
 
             self.order_canceled_event.clear()
             # Check if order is already filled before attempting to cancel
