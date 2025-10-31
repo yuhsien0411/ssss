@@ -374,83 +374,138 @@ class TradingBot:
                 await asyncio.sleep(5)
                 if self.config.exchange == "lighter":
                     current_order_status = self.exchange_client.current_order.status
+                    # Check if order is fully filled
+                    if current_order_status in ['FILLED', 'PARTIALLY_FILLED']:
+                        filled_size = getattr(self.exchange_client.current_order, 'filled_size', Decimal('0'))
+                        if filled_size and abs(Decimal(str(filled_size)) - Decimal(str(self.config.quantity))) <= Decimal('0.01'):
+                            self.logger.log(f"[OPEN] [{order_id}] ✅ Order fully filled while waiting: {filled_size}/{self.config.quantity}, exiting wait loop", "INFO")
+                            # Use config.quantity to ensure exact match
+                            self.order_filled_amount = float(self.config.quantity)
+                            break  # Exit loop, order is fully filled
                 else:
                     order_info = await self.exchange_client.get_order_info(order_id)
                     if order_info is not None:
                         current_order_status = order_info.status
+                        # Check if order is fully filled
+                        if current_order_status in ['FILLED', 'PARTIALLY_FILLED']:
+                            filled_size = getattr(order_info, 'filled_size', Decimal('0'))
+                            if filled_size and abs(Decimal(str(filled_size)) - Decimal(str(self.config.quantity))) <= Decimal('0.01'):
+                                self.logger.log(f"[OPEN] [{order_id}] ✅ Order fully filled while waiting: {filled_size}/{self.config.quantity}, exiting wait loop", "INFO")
+                                # Use config.quantity to ensure exact match
+                                self.order_filled_amount = float(self.config.quantity)
+                                break  # Exit loop, order is fully filled
                 new_order_price = await self.exchange_client.get_order_price(self.config.direction)
 
             self.order_canceled_event.clear()
-            # Cancel the order if it's still open
-            self.logger.log(f"[OPEN] [{order_id}] Cancelling order and placing a new order", "INFO")
+            # Check if order is already filled before attempting to cancel
             if self.config.exchange == "lighter":
-                cancel_result = await self.exchange_client.cancel_order(order_id)
-                start_time = time.time()
-                while (time.time() - start_time < 10 and self.exchange_client.current_order.status not in ['CANCELED', 'FILLED', 'CANCELED-POST-ONLY']):
-                    await asyncio.sleep(0.1)
-
-                if self.exchange_client.current_order.status not in ['CANCELED', 'FILLED', 'CANCELED-POST-ONLY']:
-                    raise Exception(f"[OPEN] Error cancelling order: {self.exchange_client.current_order.status}")
-                else:
-                    # ⚠️ WebSocket's filled_size may be inaccurate, force API query
-                    self.logger.log(f"[OPEN] [{order_id}] Order canceled, querying API for accurate filled_size...", "INFO")
-                    await asyncio.sleep(0.5)  # Wait for exchange to process
-                    
-                    # First: query inactive orders via API to get finalized status & filled size
-                    self.order_filled_amount = 0.0
-                    requested_order_id = str(order_id)
-                    finalized = await self.exchange_client.get_finalized_order_from_api(requested_order_id)
-                    order_info = None
-                    if finalized and finalized.filled_size > 0:
-                        self.order_filled_amount = finalized.filled_size
-                        filled_price = finalized.price
-                        self.logger.log(f"[OPEN] [{order_id}] Finalized via API: status={finalized.status}, filled_size={self.order_filled_amount}", "INFO")
-                    else:
-                        # Fallback: Force API query to get accurate filled amount with retry (current_order)
-                        for api_retry in range(3):
-                            order_info = await self.exchange_client.get_order_info(requested_order_id)
-                            if order_info and order_info.filled_size > 0:
-                                self.order_filled_amount = order_info.filled_size
-                                filled_price = order_info.price
-                                self.logger.log(f"[OPEN] [{order_id}] API query result (attempt {api_retry + 1}): filled_size={self.order_filled_amount}", "INFO")
-                                break
-                            else:
-                                self.logger.log(f"[OPEN] [{order_id}] API query attempt {api_retry + 1} failed or filled_size=0, retrying...", "WARNING")
-                                await asyncio.sleep(1)  # Wait 1 second before retry
-                        
-                        # If API still fails, try WebSocket data
-                        if self.order_filled_amount == 0:
-                            if self.exchange_client.current_order.filled_size > 0:
-                                self.order_filled_amount = self.exchange_client.current_order.filled_size
-                            self.logger.log(f"[OPEN] [{order_id}] API query failed after 3 attempts, using WebSocket data: filled_size={self.order_filled_amount}", "WARNING")
-                    # If WS 也為 0，但輪詢期間看過部分成交，使用快取救援
-                    try:
-                        if Decimal(str(self.order_filled_amount)) == 0 and self.last_polled_filled_size > 0:
-                            self.order_filled_amount = self.last_polled_filled_size
-                            self.logger.log(f"[OPEN] [{order_id}] Using cached partial fill from polling: filled_size={self.order_filled_amount}", "WARNING")
-                    except Exception:
-                        pass
-                    
-                    if self.order_filled_amount > 0:
-                        self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
-                        # Update filled_price to the actual filled price from order_info
-                        if order_info and hasattr(order_info, 'price'):
-                            filled_price = order_info.price
-                            self.logger.log(f"[OPEN] [{order_id}] Using filled price from order_info: {filled_price}", "INFO")
-                        else:
-                            self.logger.log(f"[OPEN] [{order_id}] Using order_result price as filled price: {filled_price}", "INFO")
+                final_status = self.exchange_client.current_order.status
+                final_filled = getattr(self.exchange_client.current_order, 'filled_size', Decimal('0'))
             else:
-                try:
+                final_order_info = await self.exchange_client.get_order_info(order_id)
+                final_status = final_order_info.status if final_order_info else "UNKNOWN"
+                final_filled = getattr(final_order_info, 'filled_size', Decimal('0')) if final_order_info else Decimal('0')
+            
+            is_fully_filled_check = (final_status in ['FILLED', 'PARTIALLY_FILLED'] and 
+                                    final_filled and 
+                                    abs(Decimal(str(final_filled)) - Decimal(str(self.config.quantity))) <= Decimal('0.01'))
+            
+            if is_fully_filled_check:
+                self.logger.log(f"[OPEN] [{order_id}] ✅ Order already fully filled: {final_filled}/{self.config.quantity}, skipping cancel", "INFO")
+                # Set filled amounts and proceed to close order placement
+                # Use config.quantity to ensure exact match (avoid API precision issues)
+                self.order_filled_amount = float(self.config.quantity)
+                if self.config.exchange == "lighter" and hasattr(self.exchange_client.current_order, 'price'):
+                    filled_price = self.exchange_client.current_order.price
+                elif not self.config.exchange == "lighter" and final_order_info:
+                    filled_price = final_order_info.price
+                else:
+                    filled_price = order_result.price
+                # Skip cancel logic, go directly to close order placement (will be handled below at line 526)
+            else:
+                # Cancel the order if it's still open
+                self.logger.log(f"[OPEN] [{order_id}] Cancelling order and placing a new order", "INFO")
+                if self.config.exchange == "lighter":
                     cancel_result = await self.exchange_client.cancel_order(order_id)
-                    if not cancel_result.success:
-                        self.order_canceled_event.set()
-                        self.logger.log(f"[CLOSE] Failed to cancel order {order_id}: {cancel_result.error_message}", "WARNING")
-                    else:
-                        self.current_order_status = "CANCELED"
+                    start_time = time.time()
+                    while (time.time() - start_time < 10 and self.exchange_client.current_order.status not in ['CANCELED', 'FILLED', 'CANCELED-POST-ONLY']):
+                        await asyncio.sleep(0.1)
 
-                except Exception as e:
-                    self.order_canceled_event.set()
-                    self.logger.log(f"[CLOSE] Error canceling order {order_id}: {e}", "ERROR")
+                    if self.exchange_client.current_order.status not in ['CANCELED', 'FILLED', 'CANCELED-POST-ONLY']:
+                        raise Exception(f"[OPEN] Error cancelling order: {self.exchange_client.current_order.status}")
+                    else:
+                        # ⚠️ WebSocket's filled_size may be inaccurate, force API query
+                        self.logger.log(f"[OPEN] [{order_id}] Order canceled, querying API for accurate filled_size...", "INFO")
+                        await asyncio.sleep(0.5)  # Wait for exchange to process
+                        
+                        # First: query inactive orders via API to get finalized status & filled size
+                        self.order_filled_amount = 0.0
+                        requested_order_id = str(order_id)
+                        finalized = await self.exchange_client.get_finalized_order_from_api(requested_order_id)
+                        order_info = None
+                        if finalized and finalized.filled_size > 0:
+                            self.order_filled_amount = finalized.filled_size
+                            filled_price = finalized.price
+                            self.logger.log(f"[OPEN] [{order_id}] Finalized via API: status={finalized.status}, filled_size={self.order_filled_amount}", "INFO")
+                        else:
+                            # Fallback: Force API query to get accurate filled amount with retry (current_order)
+                            for api_retry in range(3):
+                                order_info = await self.exchange_client.get_order_info(requested_order_id)
+                                if order_info and order_info.filled_size > 0:
+                                    self.order_filled_amount = order_info.filled_size
+                                    filled_price = order_info.price
+                                    self.logger.log(f"[OPEN] [{order_id}] API query result (attempt {api_retry + 1}): filled_size={self.order_filled_amount}", "INFO")
+                                    break
+                                else:
+                                    self.logger.log(f"[OPEN] [{order_id}] API query attempt {api_retry + 1} failed or filled_size=0, retrying...", "WARNING")
+                                    await asyncio.sleep(1)  # Wait 1 second before retry
+                            
+                            # If API still fails, try WebSocket data
+                            if self.order_filled_amount == 0:
+                                if self.exchange_client.current_order.filled_size > 0:
+                                    self.order_filled_amount = self.exchange_client.current_order.filled_size
+                                self.logger.log(f"[OPEN] [{order_id}] API query failed after 3 attempts, using WebSocket data: filled_size={self.order_filled_amount}", "WARNING")
+                        # If WS 也為 0，但輪詢期間看過部分成交，使用快取救援
+                        try:
+                            if Decimal(str(self.order_filled_amount)) == 0 and self.last_polled_filled_size > 0:
+                                self.order_filled_amount = self.last_polled_filled_size
+                                self.logger.log(f"[OPEN] [{order_id}] Using cached partial fill from polling: filled_size={self.order_filled_amount}", "WARNING")
+                        except Exception:
+                            pass
+                        
+                        # Check if order is fully filled (should not cancel and re-place)
+                        is_fully_filled = abs(Decimal(str(self.order_filled_amount)) - Decimal(str(self.config.quantity))) <= Decimal('0.01')
+                        if is_fully_filled:
+                            self.logger.log(f"[OPEN] [{order_id}] ✅ Order fully filled: {self.order_filled_amount}/{self.config.quantity}, skipping cancel/replace", "INFO")
+                            # Use config.quantity to ensure exact match (avoid API precision issues)
+                            self.order_filled_amount = float(self.config.quantity)
+                            # Set filled_price for close order placement
+                            if finalized:
+                                filled_price = finalized.price
+                            elif order_info and hasattr(order_info, 'price'):
+                                filled_price = order_info.price
+                            else:
+                                filled_price = order_result.price
+                            # Continue to close order placement logic (will be handled below at line 526)
+                        elif self.order_filled_amount > 0:
+                            self.logger.log(f"[OPEN] [{order_id}] Partial fill detected: {self.order_filled_amount}/{self.config.quantity}", "WARNING")
+                            # Update filled_price to the actual filled price from order_info
+                            if order_info and hasattr(order_info, 'price'):
+                                filled_price = order_info.price
+                                self.logger.log(f"[OPEN] [{order_id}] Using filled price from order_info: {filled_price}", "INFO")
+                            else:
+                                self.logger.log(f"[OPEN] [{order_id}] Using order_result price as filled price: {filled_price}", "INFO")
+                else:
+                    try:
+                        cancel_result = await self.exchange_client.cancel_order(order_id)
+                        if not cancel_result.success:
+                            self.order_canceled_event.set()
+                            self.logger.log(f"[CLOSE] Failed to cancel order {order_id}: {cancel_result.error_message}", "WARNING")
+                        else:
+                            self.current_order_status = "CANCELED"
+                    except Exception as e:
+                        self.order_canceled_event.set()
+                        self.logger.log(f"[CLOSE] Error canceling order {order_id}: {e}", "ERROR")
 
                 if self.config.exchange == "backpack" or self.config.exchange == "extended":
                     self.order_filled_amount = cancel_result.filled_size
@@ -473,8 +528,14 @@ class TradingBot:
                     self.logger.log(f"[OPEN] [{order_id}] Using order_result price as filled price: {filled_price}", "INFO")
 
             if self.order_filled_amount > 0:
-                self.logger.log(f"[CLOSE] 🎯 PARTIAL FILL DETECTED: {self.order_filled_amount}/{self.config.quantity} @ {filled_price}", "WARNING")
-                self.logger.log(f"[CLOSE] Creating REDUCE-ONLY + POST-ONLY close order for partial fill", "INFO")
+                # Check if fully filled or partially filled
+                is_fully_filled_status = abs(Decimal(str(self.order_filled_amount)) - Decimal(str(self.config.quantity))) <= Decimal('0.01')
+                if is_fully_filled_status:
+                    self.logger.log(f"[CLOSE] 🎯 FULL FILL DETECTED: {self.order_filled_amount}/{self.config.quantity} @ {filled_price}", "INFO")
+                    self.logger.log(f"[CLOSE] Creating REDUCE-ONLY + POST-ONLY close order for full fill", "INFO")
+                else:
+                    self.logger.log(f"[CLOSE] 🎯 PARTIAL FILL DETECTED: {self.order_filled_amount}/{self.config.quantity} @ {filled_price}", "WARNING")
+                    self.logger.log(f"[CLOSE] Creating REDUCE-ONLY + POST-ONLY close order for partial fill", "INFO")
                 close_side = self.config.close_order_side
                 
                 # Initialize close_order_result to avoid UnboundLocalError
