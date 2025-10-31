@@ -548,14 +548,14 @@ class TradingBot:
                         close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
                         self.logger.log(f"[CLOSE] Attempt {attempt_idx}/{max_retries} RO+PO: {self.order_filled_amount} @ {close_price}", "INFO")
 
-                    close_order_result = await self.exchange_client.place_close_order(
-                        self.config.contract_id,
-                        self.order_filled_amount,
-                        close_price,
-                        close_side
-                    )
-                    if self.config.exchange == "lighter":
-                        await asyncio.sleep(1)
+                        close_order_result = await self.exchange_client.place_close_order(
+                            self.config.contract_id,
+                            self.order_filled_amount,
+                            close_price,
+                            close_side
+                        )
+                        if self.config.exchange == "lighter":
+                            await asyncio.sleep(1)
 
                         if close_order_result.success:
                             self.logger.log(f"[CLOSE] ✅ Successfully placed REDUCE-ONLY + POST-ONLY partial fill close order on attempt {attempt_idx}", "INFO")
@@ -830,7 +830,7 @@ class TradingBot:
                                         self._last_reconcile_time = time.time()
                                         await self.send_notification(f"CRITICAL: Market close order {market_order_id} was {order_info.status}. Position {deficit} remains unclosed.")
                                         return False
-            except Exception as e:
+                        except Exception as e:
                             self.logger.log(f"[RECONCILE] Could not verify market order status: {e}", "WARNING")
                     
                     # Verify position actually decreased to avoid infinite loop
@@ -1058,7 +1058,7 @@ class TradingBot:
                         self.logger.log(f"[RECONCILE] Error: {e}", "ERROR")
                         # On error, also skip opening new orders to avoid compounding issues
                         await asyncio.sleep(2)
-                            continue
+                        continue
 
                     # Check if we have capacity for new orders
                     if len(self.active_close_orders) < self.config.max_orders:
