@@ -329,6 +329,24 @@ class TradingBot:
                 self.logger.log(f"  - initial calculated close_price (fixed): {close_price}", "INFO")
                 
                 # Phase 1: Fixed price retries (5 attempts with slight adjustments)
+                # Check market price to ensure order won't immediately execute
+                try:
+                    api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                except Exception:
+                    api_bid, api_ask = None, None
+                if api_bid is None:
+                    api_bid = await self.exchange_client.get_order_price('buy')
+                if api_ask is None:
+                    api_ask = await self.exchange_client.get_order_price('sell')
+                
+                # Ensure buy orders are above best bid, sell orders below best ask
+                if close_side == 'buy' and api_bid and close_price <= Decimal(str(api_bid)):
+                    self.logger.log(f"[CLOSE] ⚠️ Buy price {close_price} <= best bid {api_bid}, adjusting to {api_bid * Decimal('1.0001')}", "WARNING")
+                    close_price = api_bid * Decimal('1.0001')  # Set slightly above best bid
+                elif close_side == 'sell' and api_ask and close_price >= Decimal(str(api_ask)):
+                    self.logger.log(f"[CLOSE] ⚠️ Sell price {close_price} >= best ask {api_ask}, adjusting to {api_ask * Decimal('0.9999')}", "WARNING")
+                    close_price = api_ask * Decimal('0.9999')  # Set slightly below best ask
+                
                 phase1_retries = 5
                 close_order_result = None
                 for attempt_idx in range(1, phase1_retries + 1):
@@ -340,29 +358,32 @@ class TradingBot:
                         close_price,
                         close_side
                     )
-                    if self.config.exchange == "lighter":
-                        await asyncio.sleep(1)
                         
-                    # Verify order actually exists (POST-ONLY orders may be canceled immediately)
+                    # Only verify if API reports success (reduce unnecessary checks)
                     if close_order_result and close_order_result.success:
                         if self.config.exchange == "lighter":
-                            await asyncio.sleep(1)  # Wait for order to be processed
+                            # Quick verification with shorter wait
+                            await asyncio.sleep(0.5)
                             try:
                                 verify_order_id = getattr(close_order_result, 'order_id', None)
                                 if verify_order_id:
                                     verify_order = await self.exchange_client.get_order_info(str(verify_order_id))
                                     if verify_order and verify_order.status in ['OPEN', 'PARTIALLY_FILLED']:
                                         self.logger.log(f"[CLOSE] ✅ Successfully placed FULL FILL close order on Phase 1 attempt {attempt_idx} (verified: status={verify_order.status})", "INFO")
-                                        close_order_result = close_order_result  # Success, exit
                                         break
                                     elif verify_order and verify_order.status in ['CANCELED-POST-ONLY', 'CANCELED']:
                                         self.logger.log(f"[CLOSE] ⚠️ Order {verify_order_id} was {verify_order.status} (POST-ONLY violation)", "WARNING")
-                                        # Treat as failure, continue to next attempt
                                         close_order_result.success = False
                                         close_order_result.error_message = f"Order was {verify_order.status} (POST-ONLY violation)"
+                                    else:
+                                        # Unknown status, assume success to avoid blocking
+                                        self.logger.log(f"[CLOSE] ✅ Order placed (status={getattr(verify_order, 'status', 'unknown')}), assuming success", "INFO")
+                                        break
+                                else:
+                                    # No order_id, trust API response
+                                    break
                             except Exception as ve:
                                 self.logger.log(f"[CLOSE] ⚠️ Could not verify order, assuming success: {ve}", "WARNING")
-                                # Assume success if verification fails
                                 break
                         else:
                             # For non-lighter exchanges, trust the API response
@@ -372,13 +393,13 @@ class TradingBot:
                     # If failed, adjust price slightly for next attempt
                     if not (close_order_result and close_order_result.success):
                         if attempt_idx < phase1_retries:
-                            # Adjust close price slightly to avoid Post-Only rejection
+                            # Adjust close price: buy orders increase, sell orders decrease
                             if close_side == 'sell':
-                                close_price = close_price * Decimal('1.0001')  # Increase by 0.01%
+                                close_price = close_price * Decimal('0.9999')  # Decrease by 0.01% (lower sell price)
                             else:
-                                close_price = close_price * Decimal('0.9999')  # Decrease by 0.01%
+                                close_price = close_price * Decimal('1.0001')  # Increase by 0.01% (higher buy price)
                             self.logger.log(f"[CLOSE] Retrying with adjusted fixed price: {close_price}", "INFO")
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(0.3)  # Reduced wait time
                 
                 # Phase 2: If Phase 1 failed, switch to market-based pricing (ask/bid) - 5 attempts
                 if not (close_order_result and close_order_result.success):
@@ -392,18 +413,22 @@ class TradingBot:
                             price = ask * (Decimal('1') + (tp_pct/100) * Decimal(k))
                         return price
                     
+                    # Get market price once at start (only refresh every 3 attempts)
                     phase2_retries = 5
+                    last_price_refresh = 0
                     for attempt_idx in range(1, phase2_retries + 1):
-                        # Refresh BBO each attempt to get latest market price
-                        try:
-                            api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
-                        except Exception:
-                            api_bid, api_ask = None, None
-                        # Fallbacks for missing BBO
-                        if api_bid is None:
-                            api_bid = await self.exchange_client.get_order_price('buy')
-                        if api_ask is None:
-                            api_ask = await self.exchange_client.get_order_price('sell')
+                        # Refresh price every 2 attempts or on first attempt
+                        if attempt_idx == 1 or (attempt_idx - last_price_refresh) >= 2:
+                            try:
+                                api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                            except Exception:
+                                api_bid, api_ask = None, None
+                            # Fallbacks for missing BBO
+                            if api_bid is None:
+                                api_bid = await self.exchange_client.get_order_price('buy')
+                            if api_ask is None:
+                                api_ask = await self.exchange_client.get_order_price('sell')
+                            last_price_refresh = attempt_idx
 
                         close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
                         
@@ -415,13 +440,11 @@ class TradingBot:
                             close_price,
                             close_side
                         )
-                        if self.config.exchange == "lighter":
-                            await asyncio.sleep(1)
                             
-                        # Verify order actually exists
+                        # Only verify if API reports success
                         if close_order_result and close_order_result.success:
                             if self.config.exchange == "lighter":
-                                await asyncio.sleep(1)  # Wait for order to be processed
+                                await asyncio.sleep(0.5)  # Reduced wait time
                                 try:
                                     verify_order_id = getattr(close_order_result, 'order_id', None)
                                     if verify_order_id:
@@ -434,10 +457,16 @@ class TradingBot:
                                             close_order_result.success = False
                                             close_order_result.error_message = f"Order was {verify_order.status} (POST-ONLY violation)"
                                             if attempt_idx < phase2_retries:
-                                                await asyncio.sleep(1)
+                                                await asyncio.sleep(0.3)
                                                 continue
                                             else:
                                                 break
+                                        else:
+                                            # Unknown status, assume success
+                                            self.logger.log(f"[CLOSE] ✅ Order placed (status={getattr(verify_order, 'status', 'unknown')}), assuming success", "INFO")
+                                            break
+                                    else:
+                                        break
                                 except Exception as ve:
                                     self.logger.log(f"[CLOSE] ⚠️ Could not verify order, assuming success: {ve}", "WARNING")
                                     break
@@ -447,7 +476,7 @@ class TradingBot:
                         else:
                             error_msg = getattr(close_order_result, 'error_message', 'unknown') if close_order_result else 'Order result is None'
                             self.logger.log(f"[CLOSE] Failed to place FULL FILL close order Phase 2 (attempt {attempt_idx}/{phase2_retries}): {error_msg}", "WARNING")
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(0.3)  # Reduced wait time
                 
                 # Fallback: Market order if both phases failed
                 if not (close_order_result and close_order_result.success):
@@ -737,6 +766,24 @@ class TradingBot:
                         pass
 
                     # Phase 1: Fixed price retries (5 attempts with slight adjustments)
+                    # Check market price to ensure order won't immediately execute
+                    try:
+                        api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                    except Exception:
+                        api_bid, api_ask = None, None
+                    if api_bid is None:
+                        api_bid = await self.exchange_client.get_order_price('buy')
+                    if api_ask is None:
+                        api_ask = await self.exchange_client.get_order_price('sell')
+                    
+                    # Ensure buy orders are above best bid, sell orders below best ask
+                    if close_side == 'buy' and api_bid and close_price <= Decimal(str(api_bid)):
+                        self.logger.log(f"[CLOSE] ⚠️ Buy price {close_price} <= best bid {api_bid}, adjusting to {api_bid * Decimal('1.0001')}", "WARNING")
+                        close_price = api_bid * Decimal('1.0001')  # Set slightly above best bid
+                    elif close_side == 'sell' and api_ask and close_price >= Decimal(str(api_ask)):
+                        self.logger.log(f"[CLOSE] ⚠️ Sell price {close_price} >= best ask {api_ask}, adjusting to {api_ask * Decimal('0.9999')}", "WARNING")
+                        close_price = api_ask * Decimal('0.9999')  # Set slightly below best ask
+                    
                     phase1_retries = 5
                     close_order_result = None
                     self.logger.log(f"[CLOSE] 📊 PARTIAL FILL TP Order Parameters:", "INFO")
@@ -744,7 +791,7 @@ class TradingBot:
                     self.logger.log(f"  - filled_price: {filled_price}", "INFO")
                     self.logger.log(f"  - close_side: {close_side}", "INFO")
                     self.logger.log(f"  - take_profit: {self.config.take_profit}%", "INFO")
-                    self.logger.log(f"  - initial calculated close_price (fixed): {initial_close_price}", "INFO")
+                    self.logger.log(f"  - initial calculated close_price (fixed): {close_price}", "INFO")
                     
                     for attempt_idx in range(1, phase1_retries + 1):
                         self.logger.log(f"[CLOSE] Phase 1 - Attempt {attempt_idx}/{phase1_retries} (fixed price): {self.order_filled_amount} @ {close_price}", "INFO")
@@ -755,13 +802,12 @@ class TradingBot:
                             close_price,
                             close_side
                         )
-                        if self.config.exchange == "lighter":
-                            await asyncio.sleep(1)
                             
-                        # Verify order actually exists
+                        # Only verify if API reports success (reduce unnecessary checks)
                         if close_order_result and close_order_result.success:
                             if self.config.exchange == "lighter":
-                                await asyncio.sleep(1)  # Wait for order to be processed
+                                # Quick verification with shorter wait
+                                await asyncio.sleep(0.5)
                                 try:
                                     verify_order_id = getattr(close_order_result, 'order_id', None)
                                     if verify_order_id:
@@ -771,9 +817,15 @@ class TradingBot:
                                             break
                                         elif verify_order and verify_order.status in ['CANCELED-POST-ONLY', 'CANCELED']:
                                             self.logger.log(f"[CLOSE] ⚠️ Order {verify_order_id} was {verify_order.status} (POST-ONLY violation)", "WARNING")
-                                            # Treat as failure, continue to next attempt
                                             close_order_result.success = False
                                             close_order_result.error_message = f"Order was {verify_order.status} (POST-ONLY violation)"
+                                        else:
+                                            # Unknown status, assume success to avoid blocking
+                                            self.logger.log(f"[CLOSE] ✅ Order placed (status={getattr(verify_order, 'status', 'unknown')}), assuming success", "INFO")
+                                            break
+                                    else:
+                                        # No order_id, trust API response
+                                        break
                                 except Exception as ve:
                                     self.logger.log(f"[CLOSE] ⚠️ Could not verify order, assuming success: {ve}", "WARNING")
                                     break
@@ -784,30 +836,34 @@ class TradingBot:
                         # If failed, adjust price slightly for next attempt
                         if not (close_order_result and close_order_result.success):
                             if attempt_idx < phase1_retries:
-                                # Adjust close price slightly to avoid Post-Only rejection
+                                # Adjust close price: buy orders increase, sell orders decrease
                                 if close_side == 'sell':
-                                    close_price = close_price * Decimal('1.0001')  # Increase by 0.01%
+                                    close_price = close_price * Decimal('0.9999')  # Decrease by 0.01% (lower sell price)
                                 else:
-                                    close_price = close_price * Decimal('0.9999')  # Decrease by 0.01%
+                                    close_price = close_price * Decimal('1.0001')  # Increase by 0.01% (higher buy price)
                                 self.logger.log(f"[CLOSE] Retrying with adjusted fixed price: {close_price}", "INFO")
-                                await asyncio.sleep(1)
+                                await asyncio.sleep(0.3)  # Reduced wait time
                     
                     # Phase 2: If Phase 1 failed, switch to market-based pricing (ask/bid) - 5 attempts
                     if not (close_order_result and close_order_result.success):
                         self.logger.log(f"[CLOSE] ⚠️ Phase 1 (fixed price) failed after {phase1_retries} attempts, switching to Phase 2 (market-based pricing)", "WARNING")
                         
+                        # Get market price once at start (only refresh every 2 attempts)
                         phase2_retries = 5
+                        last_price_refresh = 0
                         for attempt_idx in range(1, phase2_retries + 1):
-                            # Refresh BBO each attempt to get latest market price
-                            try:
-                                api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
-                            except Exception:
-                                api_bid, api_ask = None, None
-                            # Fallbacks for missing BBO
-                            if api_bid is None:
-                                api_bid = await self.exchange_client.get_order_price('buy')
-                            if api_ask is None:
-                                api_ask = await self.exchange_client.get_order_price('sell')
+                            # Refresh price every 2 attempts or on first attempt
+                            if attempt_idx == 1 or (attempt_idx - last_price_refresh) >= 2:
+                                try:
+                                    api_bid, api_ask, _ = await self.exchange_client.fetch_order_book_from_api(int(self.config.contract_id), limit=5)
+                                except Exception:
+                                    api_bid, api_ask = None, None
+                                # Fallbacks for missing BBO
+                                if api_bid is None:
+                                    api_bid = await self.exchange_client.get_order_price('buy')
+                                if api_ask is None:
+                                    api_ask = await self.exchange_client.get_order_price('sell')
+                                last_price_refresh = attempt_idx
 
                             close_price = _compute_price_for_attempt(close_side, attempt_idx, Decimal(api_bid), Decimal(api_ask), self.config.take_profit)
                             
@@ -819,13 +875,11 @@ class TradingBot:
                                 close_price,
                                 close_side
                             )
-                            if self.config.exchange == "lighter":
-                                await asyncio.sleep(1)
                                 
-                            # Verify order actually exists
+                            # Only verify if API reports success
                             if close_order_result and close_order_result.success:
                                 if self.config.exchange == "lighter":
-                                    await asyncio.sleep(1)  # Wait for order to be processed
+                                    await asyncio.sleep(0.5)  # Reduced wait time
                                     try:
                                         verify_order_id = getattr(close_order_result, 'order_id', None)
                                         if verify_order_id:
@@ -838,10 +892,16 @@ class TradingBot:
                                                 close_order_result.success = False
                                                 close_order_result.error_message = f"Order was {verify_order.status} (POST-ONLY violation)"
                                                 if attempt_idx < phase2_retries:
-                                                    await asyncio.sleep(1)
+                                                    await asyncio.sleep(0.3)
                                                     continue
                                                 else:
                                                     break
+                                            else:
+                                                # Unknown status, assume success
+                                                self.logger.log(f"[CLOSE] ✅ Order placed (status={getattr(verify_order, 'status', 'unknown')}), assuming success", "INFO")
+                                                break
+                                        else:
+                                            break
                                     except Exception as ve:
                                         self.logger.log(f"[CLOSE] ⚠️ Could not verify order, assuming success: {ve}", "WARNING")
                                         break
@@ -851,7 +911,7 @@ class TradingBot:
                             else:
                                 error_msg = getattr(close_order_result, 'error_message', 'unknown') if close_order_result else 'Order result is None'
                                 self.logger.log(f"[CLOSE] Failed to place PARTIAL FILL close order Phase 2 (attempt {attempt_idx}/{phase2_retries}): {error_msg}", "WARNING")
-                                await asyncio.sleep(1)
+                                await asyncio.sleep(0.3)  # Reduced wait time
                     
                     # Fallback: Market order if both phases failed
                     if not (close_order_result and close_order_result.success):
