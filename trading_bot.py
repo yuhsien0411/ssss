@@ -214,9 +214,9 @@ class TradingBot:
                 self.logger.log(f"[OPEN] [{order_id}] Order filled immediately", "INFO")
                 return await self._handle_order_result(order_result)
 
-            # Poll order status every 1 second for up to 10 seconds
-            self.logger.log(f"[OPEN] [{order_id}] Polling order status every 1s for 10s", "INFO")
-            max_polls = 10
+            # Poll order status every 1 second for up to 60 seconds (or wait_time if smaller)
+            max_polls = min(self.config.wait_time, 60)  # Cap at 60 seconds for polling
+            self.logger.log(f"[OPEN] [{order_id}] Polling order status every 1s for up to {max_polls}s", "INFO")
             for poll_count in range(max_polls):
                 await asyncio.sleep(1)
                 
