@@ -286,6 +286,24 @@ ETH：
 python runbot.py --exchange extended --ticker ETH --quantity 0.1 --take-profit 0 --max-orders 40 --wait-time 450 --grid-step 0.1
 ```
 
+### Lighter 交易所（使用 Tick 模式）：
+
+ETH (Tick 模式)：
+
+```bash
+python runbot_tick.py --exchange lighter --ticker ETH --quantity 0.1 --take-profit-tick 5 --grid-step-tick 10 --max-orders 40 --wait-time 450
+```
+
+BTC (Tick 模式)：
+
+```bash
+python runbot_tick.py --exchange lighter --ticker BTC --quantity 0.05 --take-profit-tick 10 --grid-step-tick 20 --max-orders 40 --wait-time 450
+```
+
+**Tick 模式说明**：对于 Lighter 等交易所，支持以 tick 为单位设置止盈和网格步长。例如：
+- `--take-profit-tick 5`：表示止盈价格为当前价格 ± 5 个 tick
+- `--grid-step-tick 10`：表示新订单与现有订单至少相隔 10 个 tick
+
 ## 🆕 对冲模式 (Hedge Mode)
 
 新增的对冲模式 (`hedge_mode.py`) 是一个新的交易策略，通过同时在两个交易所进行对冲交易来降低风险：
@@ -414,8 +432,10 @@ python hedge_mode.py --exchange grvt --ticker BTC --size 0.05 --iter 20
 - `--max-orders`: 最大活跃订单数（默认：40）
 - `--wait-time`: 订单间等待时间（秒）（默认：450）
 - `--grid-step`: 与下一个平仓订单价格的最小距离百分比（默认：-100，表示无限制）
-- `--stop-price`: 当 `direction` 是 'buy' 时，当 price >= stop-price 时停止交易并退出程序；'sell' 逻辑相反（默认：-1，表示不会因为价格原因停止交易），参数的目的是防止订单被挂在”你认为的开多高点或开空低点“。
-- `--pause-price`: 当 `direction` 是 'buy' 时，当 price >= pause-price 时暂停交易，并在价格回到 pause-price 以下时重新开始交易；'sell' 逻辑相反（默认：-1，表示不会因为价格原因停止交易），参数的目的是防止订单被挂在”你认为的开多高点或开空低点“。
+- `--take-profit-tick`: 止盈 tick 数（例如 5 表示 5 个 tick）。**注意**：必须与 `--grid-step-tick` 一起使用
+- `--grid-step-tick`: 与下一个平仓订单的最小 tick 距离（例如 10 表示 10 个 tick）。**注意**：必须与 `--take-profit-tick` 一起使用
+- `--stop-price`: 当 `direction` 是 'buy' 时，当 price >= stop-price 时停止交易并退出程序；'sell' 逻辑相反（默认：-1，表示不会因为价格原因停止交易），参数的目的是防止订单被挂在"你认为的开多高点或开空低点"。
+- `--pause-price`: 当 `direction` 是 'buy' 时，当 price >= pause-price 时暂停交易，并在价格回到 pause-price 以下时重新开始交易；'sell' 逻辑相反（默认：-1，表示不会因为价格原因停止交易），参数的目的是防止订单被挂在"你认为的开多高点或开空低点"。
 - `--boost`: 启用 Boost 模式进行交易量提升（仅适用于 aster 和 backpack 交易所）
   Boost 模式的下单逻辑：下 maker 单开仓，成交后立即用 taker 单关仓，以此循环。磨损为一单 maker，一单 taker 的手续费，以及滑点。
 
