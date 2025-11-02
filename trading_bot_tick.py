@@ -1697,12 +1697,29 @@ class TradingBot:
                     # Check if we have capacity for new orders
                     if len(self.active_close_orders) < self.config.max_orders:
                         # Check grid step condition
-                        if await self._meet_grid_step_condition():
-                            await self._place_and_monitor_open_order()
-                            self.last_close_orders += 1
-                        else:
-                            # Grid step not met, wait a bit before checking again
-                            await asyncio.sleep(2)
+                        try:
+                            if await self._meet_grid_step_condition():
+                                await self._place_and_monitor_open_order()
+                                self.last_close_orders += 1
+                            else:
+                                # Grid step not met, wait a bit before checking again
+                                await asyncio.sleep(2)
+                        except ValueError as e:
+                            if "No bid/ask data available" in str(e):
+                                # Exchange temporarily unavailable (e.g., 503 error), wait and retry
+                                self.logger.log(f"[MAIN] ⚠️ Exchange data temporarily unavailable: {e}. Waiting 30s before retry...", "WARNING")
+                                await asyncio.sleep(30)  # Wait 30 seconds for exchange to recover
+                                continue
+                            else:
+                                # Other ValueError, log and continue
+                                self.logger.log(f"[MAIN] ⚠️ Grid step check error: {e}. Waiting 10s before retry...", "WARNING")
+                                await asyncio.sleep(10)
+                                continue
+                        except Exception as e:
+                            # Other exceptions during grid check, log and continue
+                            self.logger.log(f"[MAIN] ⚠️ Error checking grid step: {e}. Waiting 10s before retry...", "WARNING")
+                            await asyncio.sleep(10)
+                            continue
                     else:
                         # If we have max orders, wait a bit
                         await asyncio.sleep(1)
