@@ -66,6 +66,10 @@ class LighterClient(BaseExchangeClient):
         self.margin_mode_recheck_interval = 60  # Re-check every 1 minute (more frequent to ensure it stays set)
         self.margin_mode_setting_in_progress = False  # Prevent concurrent API calls
         self.margin_mode_force_before_order = os.getenv('LIGHTER_MARGIN_MODE_FORCE', 'false').lower() == 'true'  # Force reset before every order
+        
+        # Rate limiting for position queries to avoid 429 errors
+        self.last_position_query_time = 0
+        self.position_query_min_interval = 0.5  # Minimum 0.5 seconds between position queries
 
     def _validate_config(self) -> None:
         """Validate Lighter configuration."""
@@ -1088,7 +1092,7 @@ class LighterClient(BaseExchangeClient):
             self.logger.log(f"[API] Error fetching finalized order from API: {e}", "ERROR")
             return None
 
-    @query_retry(reraise=True)
+    @query_retry(reraise=True, max_attempts=3, min_wait=2, max_wait=30)
     async def _fetch_positions_with_retry(self) -> List[Dict[str, Any]]:
         """Get positions using official SDK."""
         try:
@@ -1111,13 +1115,28 @@ class LighterClient(BaseExchangeClient):
             return positions
             
         except Exception as e:
+            error_str = str(e)
+            # Check if it's a 429 Too Many Requests error
+            if "429" in error_str or "Too Many Requests" in error_str or "Too Many" in error_str:
+                self.logger.log(f"Rate limit exceeded (429) when fetching positions, will retry with longer backoff", "WARNING")
+                # Wait longer for rate limit errors
+                await asyncio.sleep(5)
             self.logger.log(f"Error fetching positions: {e}", "ERROR")
-            self.logger.log(f"Account index: {self.account_index}, Type: {type(self.account_index)}", "ERROR")
+            # Only log account index in debug mode to reduce noise
+            self.logger.log(f"Account index: {self.account_index}, Type: {type(self.account_index)}", "DEBUG")
             raise
 
     async def get_account_positions(self) -> Decimal:
         """Get account positions using official SDK."""
         try:
+            # Rate limiting: ensure minimum interval between position queries
+            current_time = time.time()
+            time_since_last_query = current_time - self.last_position_query_time
+            if time_since_last_query < self.position_query_min_interval:
+                wait_time = self.position_query_min_interval - time_since_last_query
+                await asyncio.sleep(wait_time)
+            self.last_position_query_time = time.time()
+            
             # Get account info which includes positions
             positions = await self._fetch_positions_with_retry()
 

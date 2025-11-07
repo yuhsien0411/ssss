@@ -1136,8 +1136,25 @@ class TradingBot:
                             ) for ao in active_orders_2
                         )
                         if exists_after:
-                            self.logger.log(f"[RECONCILE] ✅ Verified: similar TP still exists after re-check, skipping", "INFO")
-                            return False
+                            # Recalculate coverage including the similar TP order
+                            # The similar TP order should cover the deficit
+                            recalculated_active_close = sum(
+                                Decimal(getattr(ao, 'size', 0)) if not isinstance(ao, dict) else Decimal(ao.get('size', 0))
+                                for ao in active_orders_2
+                                if ((getattr(ao, 'side', None) == close_side) or (isinstance(ao, dict) and ao.get('side') == close_side))
+                                and (getattr(ao, 'status', 'UNKNOWN').upper() in ['OPEN', 'PARTIALLY_FILLED'])
+                            )
+                            if recalculated_active_close >= required_close:
+                                self.logger.log(f"[RECONCILE] ✅ Verified: similar TP still exists and provides sufficient coverage (ActiveClose={recalculated_active_close} >= Required={required_close}), skipping", "INFO")
+                                return False
+                            else:
+                                self.logger.log(f"[RECONCILE] ✅ Verified: similar TP still exists after re-check, but coverage still insufficient (ActiveClose={recalculated_active_close} < Required={required_close}), will place additional order", "INFO")
+                                # Continue to place order for remaining deficit
+                                # Update deficit to reflect the similar TP order
+                                remaining_deficit = (required_close - recalculated_active_close).quantize(Decimal('0.00000001'))
+                                if remaining_deficit > 0:
+                                    deficit = remaining_deficit
+                                    self.logger.log(f"[RECONCILE] Updated deficit to {deficit} after accounting for similar TP", "INFO")
                         else:
                             self.logger.log("[RECONCILE] ⚠️ Re-check found no similar TP (may have been canceled), will place now", "WARNING")
                         break
@@ -1551,25 +1568,42 @@ class TradingBot:
                                 await asyncio.sleep(1)
                                 continue
                             
-                            # If reconcile returned False, check if we have sufficient coverage
-                            if has_sufficient_coverage:
-                                # We have enough orders covering the position - this is OK, allow trading to continue
-                                self.logger.log(f"[MAIN] ✅ Position={position_amt} has sufficient coverage (ActiveClose={active_close_amount} >= Required={required_close}), allowing trading to continue", "INFO")
-                                # Continue to check if we can open new orders (don't skip)
-                                # Position tracking will be cleared when position becomes 0
-                            else:
-                                # There's an uncovered position and reconcile failed - skip opening new orders
-                                last_position = getattr(self, '_last_checked_position', None)
-                                position_decreasing = (last_position is not None and abs(position_amt) < abs(last_position))
-                                self._last_checked_position = position_amt
+                            # Re-check coverage after reconcile (reconcile may have found similar TP orders)
+                            # Refresh position and active orders to get latest state
+                            position_amt_after = await self.exchange_client.get_account_positions()
+                            if position_amt_after != 0:
+                                close_side_after = 'sell' if position_amt_after > 0 else 'buy'
+                                active_orders_after = await self.exchange_client.get_active_orders(self.config.contract_id)
+                                active_close_amount_after = sum(
+                                    Decimal(getattr(o, 'size', 0)) if not isinstance(o, dict) else Decimal(o.get('size', 0))
+                                    for o in active_orders_after
+                                    if ((getattr(o, 'side', None) == close_side_after) or (isinstance(o, dict) and o.get('side') == close_side_after))
+                                    and (getattr(o, 'status', 'UNKNOWN').upper() in ['OPEN', 'PARTIALLY_FILLED'] if hasattr(o, 'status') else True)
+                                )
+                                required_close_after = abs(position_amt_after)
+                                has_sufficient_coverage_after = active_close_amount_after >= required_close_after
                                 
-                                if position_decreasing:
-                                    self.logger.log(f"[MAIN] Position decreasing: {last_position} → {position_amt}, waiting for orders to fill...", "INFO")
-                                    await asyncio.sleep(3)  # Wait longer when position is actively decreasing
+                                if has_sufficient_coverage_after:
+                                    # We have enough orders covering the position - this is OK, allow trading to continue
+                                    self.logger.log(f"[MAIN] ✅ Position={position_amt_after} has sufficient coverage (ActiveClose={active_close_amount_after} >= Required={required_close_after}), allowing trading to continue", "INFO")
+                                    # Continue to check if we can open new orders (don't skip)
+                                    # Position tracking will be cleared when position becomes 0
                                 else:
-                                    self.logger.log(f"[MAIN] Skipping open order: position={position_amt} still needs coverage (ActiveClose={active_close_amount} < Required={required_close})", "WARNING")
-                                    await asyncio.sleep(2)
-                                continue
+                                    # There's an uncovered position and reconcile failed - skip opening new orders
+                                    last_position = getattr(self, '_last_checked_position', None)
+                                    position_decreasing = (last_position is not None and abs(position_amt_after) < abs(last_position))
+                                    self._last_checked_position = position_amt_after
+                                    
+                                    if position_decreasing:
+                                        self.logger.log(f"[MAIN] Position decreasing: {last_position} → {position_amt_after}, waiting for orders to fill...", "INFO")
+                                        await asyncio.sleep(3)  # Wait longer when position is actively decreasing
+                                    else:
+                                        self.logger.log(f"[MAIN] Skipping open order: position={position_amt_after} still needs coverage (ActiveClose={active_close_amount_after} < Required={required_close_after})", "WARNING")
+                                        await asyncio.sleep(2)
+                                    continue
+                            else:
+                                # Position resolved, clear tracking
+                                self._last_checked_position = None
                         else:
                             # Position resolved, clear tracking
                             self._last_checked_position = None
