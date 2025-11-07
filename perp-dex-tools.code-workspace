@@ -14,6 +14,9 @@
 		},
 		{
 			"path": "../Backpack-MM-Simple-main"
+		},
+		{
+			"path": "../ritmex-bot"
 		}
 	],
 	"settings": {}

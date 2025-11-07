@@ -12,6 +12,7 @@ import dotenv
 from decimal import Decimal
 from trading_bot import TradingBot, TradingConfig
 from exchanges import ExchangeFactory
+from strategies import SimpleMMConfig, SimpleMarketMaker, build_adapter
 
 
 def parse_arguments():
@@ -49,6 +50,23 @@ def parse_arguments():
                         'Sell: pause if price <= pause-price. (default: -1, no pause)')
     parser.add_argument('--boost', action='store_true',
                         help='Use the Boost mode for volume boosting')
+    parser.add_argument('--strategy', type=str, default='grid',
+                        choices=['grid', 'simple-mm'],
+                        help='Strategy to execute (default: grid).')
+    parser.add_argument('--spread', type=Decimal, default=Decimal('0.30'),
+                        help='Base spread percentage for simple-mm strategy (default: 0.30)')
+    parser.add_argument('--spread-ticks', type=int, default=None,
+                        help='Spread in ticks for simple-mm strategy (overrides --spread when set)')
+    parser.add_argument('--refresh-interval', type=float, default=2.0,
+                        help='Refresh interval in seconds for simple-mm strategy (default: 2.0)')
+    parser.add_argument('--target-position', type=Decimal, default=Decimal('0'),
+                        help='Target position size for simple-mm strategy (default: 0)')
+    parser.add_argument('--max-position', type=Decimal, default=Decimal('2'),
+                        help='Maximum net position before flattening (default: 2)')
+    parser.add_argument('--position-threshold', type=Decimal, default=Decimal('0.1'),
+                        help='Threshold before pausing accumulation (default: 0.1)')
+    parser.add_argument('--inventory-skew', type=Decimal, default=Decimal('0'),
+                        help='Inventory skew factor between 0 and 1 (default: 0)')
 
     return parser.parse_args()
 
@@ -102,7 +120,37 @@ async def main():
         sys.exit(1)
     dotenv.load_dotenv(args.env_file)
 
-    # Create configuration
+    strategy_name = args.strategy.lower()
+    exchange_name = args.exchange.lower()
+
+    if strategy_name == 'simple-mm':
+        spread_pct = args.spread
+        if args.spread_ticks is not None:
+            spread_pct = None
+
+        mm_config = SimpleMMConfig(
+            ticker=args.ticker.upper(),
+            quantity=args.quantity,
+            base_spread_pct=spread_pct,
+            spread_ticks=args.spread_ticks,
+            refresh_interval=args.refresh_interval,
+            target_position=args.target_position,
+            max_position=args.max_position,
+            position_threshold=args.position_threshold,
+            inventory_skew=args.inventory_skew,
+            exchange=exchange_name,
+        )
+
+        try:
+            exchange_client = ExchangeFactory.create_exchange(exchange_name, mm_config)
+            adapter = build_adapter(exchange_name, exchange_client, mm_config)
+            strategy = SimpleMarketMaker(adapter, mm_config)
+            await strategy.run()
+        except Exception as e:
+            print(f"simple-mm strategy failed: {e}")
+        return
+
+    # Default grid strategy
     config = TradingConfig(
         ticker=args.ticker.upper(),
         contract_id='',  # will be set in the bot's run method
@@ -112,20 +160,18 @@ async def main():
         direction=args.direction.lower(),
         max_orders=args.max_orders,
         wait_time=args.wait_time,
-        exchange=args.exchange.lower(),
+        exchange=exchange_name,
         grid_step=Decimal(args.grid_step),
         stop_price=Decimal(args.stop_price),
         pause_price=Decimal(args.pause_price),
         boost_mode=args.boost
     )
 
-    # Create and run the bot
     bot = TradingBot(config)
     try:
         await bot.run()
     except Exception as e:
         print(f"Bot execution failed: {e}")
-        # The bot's run method already handles graceful shutdown
         return
 
 
